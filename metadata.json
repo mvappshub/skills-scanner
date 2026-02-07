@@ -1,0 +1,5 @@
+{
+  "name": "Skills Scanner",
+  "description": "A web-based version of the Skills Scanner tool with a Claude Desktop inspired interface. Scans local folders for skill definitions.",
+  "requestFramePermissions": []
+}
