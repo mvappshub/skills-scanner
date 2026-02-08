@@ -1,16 +1,23 @@
 import { buildSkillBundles, normalizePath } from './bundleBuilder';
 import { buildEvidencePack } from './evidencePackBuilder';
 import { extractFacts, normalizeSkillName } from './factsExtractor';
+import { computeBundleHash, computeFactsFingerprint, computeSemanticsFingerprint, makeSemanticsMeta, sha256Hex } from './fingerprints';
 import { extractSemantics, shouldEscalateSemantics } from './semanticsAI';
 import { confidenceLevel, categoryLabel, normalizeCategory } from './taxonomy';
 import { verifySemantics } from './verifier';
-import { CategoryId, ConfidenceBasis, SkillRecord } from '../types';
+import { CategoryId, ConfidenceBasis, PendingReason, SkillRecord } from '../types';
 
 function inferRepoId(fileList: FileList): string {
   const files = Array.from(fileList);
   const first = files[0]?.webkitRelativePath?.replace(/\\/g, '/') || 'repo';
   const firstSegment = first.split('/')[0] || 'repo';
   return normalizeSkillName(firstSegment || 'repo');
+}
+
+function inferSourceRootLabel(fileList: FileList): string {
+  const files = Array.from(fileList);
+  const first = files[0]?.webkitRelativePath?.replace(/\\/g, '/') || 'repo';
+  return first.split('/')[0] || 'repo';
 }
 
 function collectGlobalPaths(fileList: FileList): Set<string> {
@@ -123,11 +130,20 @@ function makeInitialRecord(args: {
   rawSkillContent: string;
   missingReferencedFiles: string[];
   outsideRootReferencedFiles: string[];
+  factsFingerprint: string;
+  semanticsFingerprint: string;
+  semanticsMeta: SkillRecord['semanticsMeta'];
+  factsUpdatedAt: string;
+  libraryId: string;
+  sourceRootLabel: string;
 }): SkillRecord {
   return {
     id: args.id,
     skillId: args.id,
     repoId: args.facts.repoId,
+    libraryId: args.libraryId,
+    sourceRootLabel: args.sourceRootLabel,
+    datasetLabel: args.facts.repoId,
     name: args.name,
     oneLiner: args.oneLiner,
     categoryId: args.categoryId,
@@ -155,6 +171,14 @@ function makeInitialRecord(args: {
     facts: args.facts,
     evidencePack: args.evidencePack,
     semantics: null,
+    semanticsMeta: args.semanticsMeta,
+    semanticsStatus: 'pending',
+    pendingReason: 'new_skill',
+    factsFingerprint: args.factsFingerprint,
+    semanticsFingerprint: args.semanticsFingerprint,
+    factsUpdatedAt: args.factsUpdatedAt,
+    semanticsUpdatedAt: null,
+    lastError: null,
     rawSkillContent: args.rawSkillContent,
     analysisStatus: 'not_analyzed',
   };
@@ -162,6 +186,9 @@ function makeInitialRecord(args: {
 
 export async function scanFiles(fileList: FileList): Promise<SkillRecord[]> {
   const repoId = inferRepoId(fileList);
+  const sourceRootLabel = inferSourceRootLabel(fileList);
+  const libraryId = repoId;
+  const scanTimestamp = new Date().toISOString();
   const globalPaths = collectGlobalPaths(fileList);
   const scriptsInFileList = Array.from(fileList).filter((file) =>
     normalizePath(file.webkitRelativePath || file.name).toLowerCase().includes('/scripts/'),
@@ -186,6 +213,11 @@ export async function scanFiles(fileList: FileList): Promise<SkillRecord[]> {
     const skillContent = await bundle.skillMdFile.file.text();
     const facts = await extractFacts(bundle, skillContent, repoId);
     const evidencePack = buildEvidencePack(bundle.id, skillContent, facts);
+    const skillMdHash = await sha256Hex(skillContent);
+    const bundleHash = await computeBundleHash(bundle);
+    const factsFingerprint = await computeFactsFingerprint(skillMdHash, bundleHash);
+    const semanticsMeta = makeSemanticsMeta(skillMdHash);
+    const semanticsFingerprint = await computeSemanticsFingerprint(semanticsMeta);
 
     const name = facts.canonicalName;
     const oneLiner = facts.frontmatter.description || 'No semantic summary yet';
@@ -221,6 +253,12 @@ export async function scanFiles(fileList: FileList): Promise<SkillRecord[]> {
         rawSkillContent: skillContent,
         missingReferencedFiles: referenceCheck.missing,
         outsideRootReferencedFiles: referenceCheck.outsideRoot,
+        factsFingerprint,
+        semanticsFingerprint,
+        semanticsMeta,
+        factsUpdatedAt: scanTimestamp,
+        libraryId,
+        sourceRootLabel,
       }),
     );
   }
@@ -271,7 +309,7 @@ export async function scanFiles(fileList: FileList): Promise<SkillRecord[]> {
   });
 }
 
-function applySemantics(record: SkillRecord, semantics: NonNullable<SkillRecord['semantics']>): SkillRecord {
+export function applySemantics(record: SkillRecord, semantics: NonNullable<SkillRecord['semantics']>): SkillRecord {
   const flags = verifySemantics(record.facts, semantics, {
     duplicateNameCount: record.duplicateNameCount,
     missingReferencedFiles: record.missingReferencedFiles,
@@ -298,7 +336,33 @@ function applySemantics(record: SkillRecord, semantics: NonNullable<SkillRecord[
     prerequisites: semantics.prerequisites,
     constraints: semantics.constraints,
     flags,
+    semanticsStatus: 'ok',
+    pendingReason: null,
+    semanticsUpdatedAt: new Date().toISOString(),
+    lastError: null,
     analysisStatus: semantics.confidence > 0 ? 'done' : 'failed',
+  };
+}
+
+export function clearSemantics(
+  record: SkillRecord,
+  lastError: string | null = null,
+  pendingReason: PendingReason | null = 'skill_changed',
+): SkillRecord {
+  return {
+    ...record,
+    semantics: null,
+    semanticsStatus: lastError ? 'error' : 'pending',
+    pendingReason: lastError ? null : pendingReason,
+    semanticsUpdatedAt: null,
+    lastError,
+    inputs: [],
+    artifacts: [],
+    capabilities: [],
+    inputsTags: [],
+    artifactsTags: [],
+    capabilitiesTags: [],
+    analysisStatus: lastError ? 'failed' : 'not_analyzed',
   };
 }
 

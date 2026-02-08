@@ -10,6 +10,16 @@ export type Stage =
   | 'other';
 
 export type RiskLevel = 'safe' | 'warning' | 'danger';
+export type SemanticsStatus = 'ok' | 'pending' | 'error';
+export type PendingReason =
+  | 'new_skill'
+  | 'skill_changed'
+  | 'model_changed'
+  | 'vocab_changed'
+  | 'prompt_changed'
+  | 'logic_changed'
+  | 'recovery_after_error'
+  | 'ambiguous_identity';
 
 export type ConfidenceBasis = 'rules' | 'llm' | 'hybrid';
 
@@ -134,6 +144,7 @@ export interface InvalidTagIssue {
   field: keyof MachineTagSemantics;
   rawTag: string;
   mappedTo?: string;
+  reason?: 'unknown_tag' | 'field_not_allowed' | 'artifact_evidence_missing';
 }
 
 export interface Semantics {
@@ -149,6 +160,14 @@ export interface Semantics {
   confidenceBasis: ConfidenceBasis;
   evidence: SemanticsEvidence[];
   invalidTagIssues: InvalidTagIssue[];
+}
+
+export interface SemanticsVersionMeta {
+  modelId: string;
+  promptVersion: string;
+  vocabVersion: string;
+  logicVersion: string;
+  skillMdHash: string;
 }
 
 export interface QualityFlag {
@@ -167,6 +186,7 @@ export interface QualityFlag {
     | 'MISSING_ARTIFACTS'
     | 'MISSING_CAPABILITIES'
     | 'INVALID_TAG'
+    | 'INVALID_TAG_FOR_FIELD'
     | 'MCP_CONTRADICTION'
     | 'SCRIPT_CONTRADICTION'
     | 'DETERMINISTIC_DANGER';
@@ -180,7 +200,36 @@ export interface SkillGraphEdge {
   from: string;
   to: string;
   type: EdgeType;
+  score: number;
+  overlapTags: string[];
   via: string[];
+}
+
+export interface GraphNodeDegree {
+  id: string;
+  degree: number;
+  inDegree: number;
+  outDegree: number;
+}
+
+export interface GraphDropReasons {
+  stoplist: number;
+  spec: number;
+  threshold: number;
+  topK: number;
+  stage: number;
+  similarity: number;
+  reciprocalDependsOn: number;
+}
+
+export interface GraphMetrics {
+  edgeCount: number;
+  density: number;
+  distributionByType: Record<EdgeType, number>;
+  topDegreeNodes: GraphNodeDegree[];
+  dropReasons: GraphDropReasons;
+  threshold: number;
+  candidateCount: number;
 }
 
 export interface SkillGraph {
@@ -188,12 +237,93 @@ export interface SkillGraph {
   adjacency: Record<string, string[]>;
   relatedBySkill: Record<string, string[]>;
   chains: string[][];
+  metrics: GraphMetrics;
+}
+
+export interface WorkflowPlanStep {
+  id?: string;
+  title?: string;
+  stage: Stage;
+  inputsTags: string[];
+  outputsTags: string[];
+  capabilitiesTags?: string[];
+}
+
+export interface WorkflowPlan {
+  id?: string;
+  name?: string;
+  steps: WorkflowPlanStep[];
+}
+
+export interface WorkflowArchitectInput {
+  description: string;
+  workflowType: string;
+  stack: string;
+  constraints: string;
+}
+
+export interface WorkflowTemplateRecord {
+  templateId: string;
+  name: string;
+  description: string;
+  workflowType: string;
+  stack: string;
+  constraints: string;
+  plan: WorkflowPlan;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkflowFeedbackCandidateType = 'selected' | 'alternative';
+
+export interface WorkflowFeedbackRecord {
+  feedbackId: string;
+  skillId: string;
+  stepId: string;
+  stepStage: Stage;
+  expectedTags: string[];
+  matchedTags: string[];
+  rating: 1 | -1;
+  candidateType: WorkflowFeedbackCandidateType;
+  createdAt: string;
+}
+
+export interface WorkflowSkillCandidate {
+  skillId: string;
+  name: string;
+  stage: Stage;
+  score: number;
+  confidence: number;
+  matchedTags: string[];
+  reasoning: string;
+}
+
+export interface WorkflowStepAssembly {
+  stepId: string;
+  title: string;
+  stage: Stage;
+  selected: WorkflowSkillCandidate | null;
+  alternatives: WorkflowSkillCandidate[];
+  overlapTags: string[];
+  missingCapabilities: string[];
+  locked: boolean;
+}
+
+export interface SkillWorkflowAssembly {
+  selected: WorkflowSkillCandidate[];
+  alternatives: Record<string, WorkflowSkillCandidate[]>;
+  reasoning: Record<string, string>;
+  missingCapabilities: string[];
+  steps: WorkflowStepAssembly[];
 }
 
 export interface SkillRecord {
   id: string;
   skillId: string;
   repoId: string;
+  libraryId: string;
+  sourceRootLabel: string;
+  datasetLabel: string;
   name: string;
   oneLiner: string;
   categoryId: CategoryId;
@@ -221,6 +351,14 @@ export interface SkillRecord {
   facts: Facts;
   evidencePack: EvidencePack;
   semantics: Semantics | null;
+  semanticsMeta: SemanticsVersionMeta;
+  semanticsStatus: SemanticsStatus;
+  pendingReason: PendingReason | null;
+  factsFingerprint: string;
+  semanticsFingerprint: string;
+  factsUpdatedAt: string;
+  semanticsUpdatedAt: string | null;
+  lastError: string | null;
   rawSkillContent: string;
   analysisStatus: 'not_analyzed' | 'analyzing' | 'done' | 'failed';
 }
@@ -239,4 +377,17 @@ export interface AnalyzeProgress {
   current: number;
   total: number;
   phase: 'pass1' | 'pass2';
+}
+
+export interface CacheStats {
+  datasetLabel: string | null;
+  totalSkills: number;
+  cachedSemanticsCount: number;
+  pendingSemanticsCount: number;
+  lastRunAt: string | null;
+  estimatedBytes: number;
+  estimatedMegabytes: number;
+  warningThresholdBytes: number;
+  warningLevel: 'ok' | 'warning' | 'danger';
+  runCount: number;
 }

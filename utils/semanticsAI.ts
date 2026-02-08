@@ -1,6 +1,10 @@
-import { CategoryId, ConfidenceBasis, EvidencePack, Facts, MachineTagSemantics, Semantics, Stage } from '../types';
+import { CategoryId, ConfidenceBasis, EvidencePack, Facts, InvalidTagIssue, MachineTagSemantics, Semantics, Stage } from '../types';
 import { normalizeCategory } from './taxonomy';
-import { sanitizeMachineTags, tagVocabularyForPrompt } from './tagVocabulary';
+import { fieldTagVocabularyForPrompt, isArtifactInterfaceTag, sanitizeMachineTags, tagVocabularyForPrompt } from './tagVocabulary';
+
+export const SEMANTICS_MODEL_ID = 'gemini-2.5-flash';
+export const SEMANTICS_PROMPT_VERSION = 'p1-v1';
+export const SEMANTICS_LOGIC_VERSION = 'semantics-v1';
 
 async function loadGenAISDK() {
   const module = await import('@google/genai');
@@ -86,9 +90,11 @@ function createPrompt(facts: Facts, evidence: EvidencePack, deep: boolean): stri
     '- humanReadable.inputsText: 3-8 short descriptive phrases',
     '- humanReadable.artifactsText: 3-8 concrete deliverables (files/json/docs/prompts)',
     '- humanReadable.capabilitiesText: 3-8 abilities',
-    `- machineTags.inputsTags: 3-8 canonical tags from allowed vocabulary only: ${tagVocabularyForPrompt()}`,
-    `- machineTags.artifactsTags: 3-8 canonical tags from allowed vocabulary only: ${tagVocabularyForPrompt()}`,
-    `- machineTags.capabilitiesTags: 3-8 canonical tags from allowed vocabulary only: ${tagVocabularyForPrompt()}`,
+    `- machineTags.inputsTags: 3-8 canonical tags from allowed vocabulary only: ${fieldTagVocabularyForPrompt('inputsTags')}`,
+    `- machineTags.artifactsTags: 3-8 canonical tags for OUTPUT artifacts only, from: ${fieldTagVocabularyForPrompt('artifactsTags')}`,
+    `- machineTags.capabilitiesTags: 3-8 canonical tags from allowed vocabulary only: ${fieldTagVocabularyForPrompt('capabilitiesTags')}`,
+    '- artifactsTags must correspond to actual output artifacts in humanReadable.artifactsText.',
+    '- Do NOT infer artifactsTags from inputs or capabilities.',
     '- prerequisites: assumptions/dependencies',
     '- constraints: limits/requirements',
     '- sideEffects: risky or consequential actions',
@@ -97,6 +103,7 @@ function createPrompt(facts: Facts, evidence: EvidencePack, deep: boolean): stri
     '- confidenceBasis: one of rules, llm, hybrid',
     '- evidence: list of objects [{ field, quote }]',
     '- Never invent new tags outside the allowed vocabulary.',
+    `- Global canonical vocabulary reference: ${tagVocabularyForPrompt()}`,
   ].join('\n');
 }
 
@@ -135,6 +142,111 @@ function sanitizeConfidenceBasis(value: string): ConfidenceBasis {
   return 'llm';
 }
 
+const ARTIFACT_TAG_EVIDENCE_HINTS: Record<string, string[]> = {
+  plan: ['plan', 'roadmap', 'implementation plan'],
+  spec: ['spec', 'specification', 'requirements doc', 'prd'],
+  schema: ['schema', 'erd', 'model', 'migration'],
+  code: ['code', 'implementation', 'source', 'module'],
+  patch: ['patch', 'diff', 'changeset'],
+  tests: ['test', 'suite', 'coverage'],
+  docs: ['doc', 'documentation', 'guide'],
+  config: ['config', 'configuration', 'settings', 'yaml', 'json', 'toml'],
+  report: ['report', 'summary', 'analysis'],
+  pr: ['pull request', 'pr'],
+  deploy: ['deploy', 'release'],
+  readme: ['readme'],
+  changelog: ['changelog', 'release notes'],
+  templates: ['template'],
+  examples: ['example'],
+  diagram: ['diagram', 'flowchart', 'mermaid'],
+  scripts: ['script'],
+  export: ['export'],
+  csv: ['csv'],
+  json: ['json'],
+  yaml: ['yaml', 'yml'],
+  markdown: ['markdown', '.md'],
+  pdf: ['pdf'],
+  docx: ['docx'],
+  pptx: ['pptx', 'slides', 'deck'],
+  image: ['image', 'screenshot'],
+  video: ['video'],
+  audio: ['audio'],
+};
+
+function normalizeForMatch(value: string): string {
+  return value.toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function hasAnyNeedle(haystack: string, needles: string[]): boolean {
+  const normalizedHaystack = normalizeForMatch(haystack);
+  return needles.some((needle) => normalizedHaystack.includes(normalizeForMatch(needle)));
+}
+
+const ARTIFACT_CONTEXT_HINTS = ['output', 'artifact', 'deliverable', 'generate', 'create', 'produce', 'file', 'document'];
+
+function enforceArtifactsEvidence(
+  artifactsTags: string[],
+  artifactsText: string[],
+  inputsText: string[],
+  capabilitiesText: string[],
+  oneLiner: string,
+  evidence: Semantics['evidence'],
+): { keptTags: string[]; issues: InvalidTagIssue[]; confidencePenalty: number } {
+  if (!artifactsTags.length) {
+    return { keptTags: [], issues: [], confidencePenalty: 0 };
+  }
+
+  const artifactsCorpus = artifactsText.join('\n');
+  const contextualCorpus = [oneLiner, ...inputsText, ...capabilitiesText].join('\n');
+  const evidenceCorpus = evidence
+    .map((item) => item.quote)
+    .join('\n');
+  const artifactFocusedEvidence = evidence
+    .filter(
+      (item) =>
+        (item.field || '').toLowerCase().includes('artifact') ||
+        hasAnyNeedle(item.quote, ARTIFACT_CONTEXT_HINTS),
+    )
+    .map((item) => item.quote)
+    .join('\n');
+  const strictCorpus = `${artifactsCorpus}\n${artifactFocusedEvidence}`;
+  const fallbackCorpus = `${contextualCorpus}\n${evidenceCorpus}`;
+  const hasArtifactContext = artifactsText.length > 0 || hasAnyNeedle(strictCorpus, ARTIFACT_CONTEXT_HINTS);
+
+  const keptTags: string[] = [];
+  const issues: InvalidTagIssue[] = [];
+
+  for (const tag of artifactsTags) {
+    const hints = ARTIFACT_TAG_EVIDENCE_HINTS[tag] ?? [tag.replace(/-/g, ' ')];
+    const supportedStrict = hasAnyNeedle(strictCorpus, hints);
+    const supportedFallback =
+      !supportedStrict &&
+      isArtifactInterfaceTag(tag) &&
+      hasArtifactContext &&
+      hasAnyNeedle(fallbackCorpus, hints);
+
+    if (supportedStrict || supportedFallback) {
+      keptTags.push(tag);
+    } else {
+      issues.push({
+        field: 'artifactsTags',
+        rawTag: tag,
+        mappedTo: tag,
+        reason: 'artifact_evidence_missing',
+      });
+    }
+  }
+
+  const droppedCount = artifactsTags.length - keptTags.length;
+  const confidencePenalty = droppedCount > 0 ? Math.min(0.15, droppedCount * 0.04) : 0;
+
+  return {
+    keptTags,
+    issues,
+    confidencePenalty,
+  };
+}
+
 export async function extractSemantics(
   facts: Facts,
   evidence: EvidencePack,
@@ -147,7 +259,7 @@ export async function extractSemantics(
     const ai = await getClient();
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: SEMANTICS_MODEL_ID,
       contents: createPrompt(facts, evidence, deep),
       config: {
         responseMimeType: 'application/json',
@@ -235,8 +347,27 @@ export async function extractSemantics(
       capabilitiesTags: humanReadable.capabilitiesText,
     });
 
-    const machineTags = mergeMachineTags(directMachineTags.machineTags, fallbackFromHuman.machineTags);
-    const invalidTagIssues = directMachineTags.invalidTagIssues;
+    const mergedMachineTags = mergeMachineTags(directMachineTags.machineTags, fallbackFromHuman.machineTags);
+    const artifactEvidence = enforceArtifactsEvidence(
+      mergedMachineTags.artifactsTags,
+      humanReadable.artifactsText,
+      humanReadable.inputsText,
+      humanReadable.capabilitiesText,
+      parsed.oneLiner?.trim() || '',
+      Array.isArray(parsed.evidence) ? parsed.evidence.slice(0, 12) : [],
+    );
+
+    const machineTags: MachineTagSemantics = {
+      ...mergedMachineTags,
+      artifactsTags: artifactEvidence.keptTags,
+    };
+    const invalidTagIssues = [
+      ...directMachineTags.invalidTagIssues,
+      ...fallbackFromHuman.invalidTagIssues,
+      ...artifactEvidence.issues,
+    ];
+    const baseConfidence = Math.max(0, Math.min(1, Number(parsed.confidence || 0)));
+    const confidence = Math.max(0, baseConfidence - artifactEvidence.confidencePenalty);
 
     return {
       oneLiner: parsed.oneLiner?.trim() || 'No summary',
@@ -247,7 +378,7 @@ export async function extractSemantics(
       constraints: normalizeTextList(parsed.constraints, 10),
       sideEffects: normalizeTextList(parsed.sideEffects, 10),
       categoryId: sanitizeCategory(parsed.categoryId || 'general'),
-      confidence: Math.max(0, Math.min(1, Number(parsed.confidence || 0))),
+      confidence,
       confidenceBasis: sanitizeConfidenceBasis(parsed.confidenceBasis || 'llm'),
       evidence: Array.isArray(parsed.evidence) ? parsed.evidence.slice(0, 12) : [],
       invalidTagIssues,

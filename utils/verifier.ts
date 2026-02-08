@@ -163,13 +163,20 @@ export function verifySemantics(facts: Facts, semantics: Semantics, context: Ver
 
   if (semantics.invalidTagIssues.length > 0) {
     for (const issue of semantics.invalidTagIssues.slice(0, 5)) {
+      const isFieldViolation =
+        issue.reason === 'field_not_allowed' || issue.reason === 'artifact_evidence_missing';
       flags.push({
         level: 'warning',
-        code: 'INVALID_TAG',
+        code: isFieldViolation ? 'INVALID_TAG_FOR_FIELD' : 'INVALID_TAG',
         field: issue.field,
-        message: issue.mappedTo
-          ? `Unknown tag "${issue.rawTag}" normalized to "${issue.mappedTo}"`
-          : `Unknown tag "${issue.rawTag}" dropped`,
+        message:
+          issue.reason === 'artifact_evidence_missing'
+            ? `Artifact tag "${issue.mappedTo || issue.rawTag}" dropped (no artifacts evidence)`
+            : issue.reason === 'field_not_allowed'
+              ? `Tag "${issue.mappedTo || issue.rawTag}" not allowed in field "${issue.field}"`
+              : issue.mappedTo
+                ? `Unknown tag "${issue.rawTag}" normalized to "${issue.mappedTo}"`
+                : `Unknown tag "${issue.rawTag}" dropped`,
       });
     }
   }

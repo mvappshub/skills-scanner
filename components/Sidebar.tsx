@@ -1,14 +1,27 @@
-import React from 'react';
-import { LayoutDashboard, FileText, Upload, Settings, Loader2, Sparkles } from 'lucide-react';
-import { AnalyzeProgress } from '../types';
+import React, { useRef } from 'react';
+import { Database, Download, FileText, GitBranch, LayoutDashboard, Loader2, Settings, Sparkles, Upload } from 'lucide-react';
+import { AnalyzeProgress, CacheStats } from '../types';
 
 interface SidebarProps {
   currentView: string;
   onChangeView: (view: string) => void;
   skillCount: number;
   analysisProgress?: AnalyzeProgress | null;
+  cacheStats: CacheStats;
+  scanMode: 'merge' | 'full_rescan';
   onRunPass1: () => void;
   onRunPass2: () => void;
+  onExportCache: () => void;
+  onImportCache: (file: File) => void;
+  onClearHeavyFields: () => void;
+  onClearOldRuns: () => void;
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return 'n/a';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'n/a';
+  return parsed.toLocaleString();
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -16,11 +29,32 @@ const Sidebar: React.FC<SidebarProps> = ({
   onChangeView,
   skillCount,
   analysisProgress,
+  cacheStats,
+  scanMode,
   onRunPass1,
   onRunPass2,
+  onExportCache,
+  onImportCache,
+  onClearHeavyFields,
+  onClearOldRuns,
 }) => {
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const pendingCount = cacheStats.pendingSemanticsCount;
+  const warningThresholdMb = cacheStats.warningThresholdBytes / (1024 * 1024);
+
+  const triggerImport = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    onImportCache(file);
+    event.currentTarget.value = '';
+  };
+
   return (
-    <div className="w-[260px] bg-claude-sidebar h-screen flex flex-col border-r border-claude-border shrink-0 font-sans">
+    <div className="w-[280px] bg-claude-sidebar h-screen flex flex-col border-r border-claude-border shrink-0 font-sans">
       <div className="p-4 pt-5 pb-4">
         <div className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-[#E3E2DE] transition-colors cursor-default group">
           <div className="w-7 h-7 bg-claude-accent rounded-[6px] text-white flex items-center justify-center text-sm font-serif font-bold shadow-sm group-hover:scale-105 transition-transform">
@@ -43,18 +77,79 @@ const Sidebar: React.FC<SidebarProps> = ({
       <div className="px-4 mb-3 space-y-2">
         <button
           onClick={onRunPass1}
-          disabled={skillCount === 0 || Boolean(analysisProgress)}
+          disabled={pendingCount === 0 || Boolean(analysisProgress)}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold bg-claude-accent text-white disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <Sparkles size={14} /> Analyze All (Pass 1)
+          <Sparkles size={14} /> Analyze Pending (Pass 1)
         </button>
         <button
           onClick={onRunPass2}
-          disabled={skillCount === 0 || Boolean(analysisProgress)}
+          disabled={pendingCount === 0 || Boolean(analysisProgress)}
           className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold bg-gray-800 text-white disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <Sparkles size={14} /> Deep Analyze (Pass 2)
+          <Sparkles size={14} /> Deep Analyze Pending (Pass 2)
         </button>
+      </div>
+
+      <div className="px-4 mb-3 grid grid-cols-2 gap-2">
+        <button
+          onClick={onExportCache}
+          className="inline-flex items-center justify-center gap-1.5 px-2 py-2 rounded-md text-[11px] font-semibold border border-[#D9D6CE] bg-white text-gray-700 hover:bg-[#F5F3EE]"
+        >
+          <Download size={12} />
+          Export Cache
+        </button>
+        <button
+          onClick={triggerImport}
+          className="inline-flex items-center justify-center gap-1.5 px-2 py-2 rounded-md text-[11px] font-semibold border border-[#D9D6CE] bg-white text-gray-700 hover:bg-[#F5F3EE]"
+        >
+          <Upload size={12} />
+          Import Cache
+        </button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={handleImportChange}
+        />
+      </div>
+
+      <div className="mx-4 mb-3 rounded-lg border border-[#E4E1D8] bg-white p-3 text-xs text-gray-700 space-y-1.5">
+        <div className="inline-flex items-center gap-1.5 text-gray-800 font-semibold">
+          <Database size={12} />
+          Cache Status
+        </div>
+        <div>skills: {cacheStats.totalSkills}</div>
+        <div>cached semantics: {cacheStats.cachedSemanticsCount}</div>
+        <div>pending/changed: {cacheStats.pendingSemanticsCount}</div>
+        <div>runs: {cacheStats.runCount}</div>
+        <div>size: {cacheStats.estimatedMegabytes.toFixed(1)} MB</div>
+        <div className={`text-[11px] ${
+          cacheStats.warningLevel === 'danger'
+            ? 'text-red-700'
+            : cacheStats.warningLevel === 'warning'
+              ? 'text-amber-700'
+              : 'text-emerald-700'
+        }`}>
+          quota health: {cacheStats.warningLevel.toUpperCase()} (warn at {warningThresholdMb.toFixed(0)} MB)
+        </div>
+        <div className="text-[11px] text-gray-500">scan mode: {scanMode === 'merge' ? 'merge-only' : 'full rescan (prune)'}</div>
+        <div className="text-[11px] text-gray-500">last run: {formatTimestamp(cacheStats.lastRunAt)}</div>
+        <div className="grid grid-cols-2 gap-2 pt-2">
+          <button
+            onClick={onClearHeavyFields}
+            className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border border-[#D9D6CE] bg-white text-gray-700 hover:bg-[#F5F3EE]"
+          >
+            Clear heavy
+          </button>
+          <button
+            onClick={onClearOldRuns}
+            className="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[10px] font-semibold border border-[#D9D6CE] bg-white text-gray-700 hover:bg-[#F5F3EE]"
+          >
+            Clear old runs
+          </button>
+        </div>
       </div>
 
       <nav className="flex-1 px-3 py-2 space-y-0.5 overflow-y-auto">
@@ -95,6 +190,21 @@ const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </button>
 
+        <button
+          onClick={() => onChangeView('workflow')}
+          disabled={skillCount === 0}
+          className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+            currentView === 'workflow'
+              ? 'bg-[#E3E2DE] text-gray-900 font-medium'
+              : 'text-[#5F5E5B] hover:bg-[#EAE9E4] hover:text-gray-900'
+          } ${skillCount === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
+          <div className="flex items-center gap-3">
+            <GitBranch size={18} strokeWidth={1.5} />
+            <span>Workflow</span>
+          </div>
+        </button>
+
         {analysisProgress && (
           <div className="mt-6 mx-2 p-3 bg-white border border-claude-border rounded-lg animate-fade-in shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)]">
             <div className="flex items-center gap-2 mb-2 text-xs font-medium text-claude-accent">
@@ -121,7 +231,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           </div>
           <div>
             <div className="font-medium">Settings</div>
-            <div className="opacity-70">v2.0.0</div>
+            <div className="opacity-70">v2.1.0</div>
           </div>
         </div>
       </div>

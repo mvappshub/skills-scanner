@@ -8,6 +8,7 @@ interface DashboardProps {
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ stats, graph }) => {
+  const metrics = graph.metrics;
   const stageData = Object.entries(stats.byStage).map(([name, value]) => ({ name, value }));
   const riskData = [
     { name: 'Safe', value: stats.byRisk.safe, color: '#10B981' },
@@ -20,10 +21,7 @@ const Dashboard: React.FC<DashboardProps> = ({ stats, graph }) => {
     .sort((a, b) => Number(b.value) - Number(a.value))
     .slice(0, 8);
 
-  const edgeTypeData: Record<string, number> = {};
-  for (const edge of graph.edges) {
-    edgeTypeData[edge.type] = (edgeTypeData[edge.type] || 0) + 1;
-  }
+  const edgeTypeData = metrics.distributionByType;
 
   return (
     <div className="p-10 max-w-6xl mx-auto space-y-10 animate-fade-in pb-20">
@@ -53,9 +51,10 @@ const Dashboard: React.FC<DashboardProps> = ({ stats, graph }) => {
         </div>
         <div className="bg-white p-6 rounded-xl border border-claude-border shadow-sm">
           <div className="text-claude-subtext text-xs font-semibold uppercase tracking-wider mb-2">Graph Edges</div>
-          <div className="text-4xl font-serif text-gray-900">{graph.edges.length}</div>
-          {graph.edges.length === 0 ? (
-            <p className="text-xs text-amber-700 mt-2">No edges - check tags.</p>
+          <div className="text-4xl font-serif text-gray-900">{metrics.edgeCount}</div>
+          <p className="text-xs text-gray-500 mt-2">Density {(metrics.density * 100).toFixed(2)}%</p>
+          {metrics.edgeCount === 0 ? (
+            <p className="text-xs text-amber-700 mt-1">No edges after stoplist/specificity/threshold/topK.</p>
           ) : null}
         </div>
       </div>
@@ -111,8 +110,8 @@ const Dashboard: React.FC<DashboardProps> = ({ stats, graph }) => {
 
         <div className="bg-white p-8 rounded-xl border border-claude-border shadow-sm">
           <h3 className="font-serif text-xl text-gray-900 mb-4">Edge Types</h3>
-          {Object.keys(edgeTypeData).length === 0 ? (
-            <p className="text-sm text-gray-500">No edges - check tags.</p>
+          {metrics.edgeCount === 0 ? (
+            <p className="text-sm text-gray-500">No edges - constraints/threshold removed all candidates.</p>
           ) : (
             <div className="space-y-2 text-sm">
               {Object.entries(edgeTypeData).map(([name, value]) => (
@@ -123,6 +122,41 @@ const Dashboard: React.FC<DashboardProps> = ({ stats, graph }) => {
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="bg-white p-8 rounded-xl border border-claude-border shadow-sm">
+          <h3 className="font-serif text-xl text-gray-900 mb-4">Top 10 Degree Nodes</h3>
+          {metrics.topDegreeNodes.length === 0 ? (
+            <p className="text-sm text-gray-500">No degree data yet.</p>
+          ) : (
+            <div className="space-y-2 text-sm">
+              {metrics.topDegreeNodes.map((node) => (
+                <div key={node.id} className="flex items-center justify-between bg-[#F9F8F5] border border-[#ECEAE4] rounded px-3 py-2">
+                  <span className="font-mono text-gray-700 truncate mr-3">{node.id}</span>
+                  <span className="text-gray-500 shrink-0">
+                    deg {node.degree} | in {node.inDegree} | out {node.outDegree}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white p-8 rounded-xl border border-claude-border shadow-sm">
+          <h3 className="font-serif text-xl text-gray-900 mb-4">Drop Reasons</h3>
+          <div className="space-y-2 text-sm">
+            {Object.entries(metrics.dropReasons).map(([name, value]) => (
+              <div key={name} className="flex items-center justify-between bg-[#F9F8F5] border border-[#ECEAE4] rounded px-3 py-2">
+                <span className="font-mono text-gray-700">{name}</span>
+                <span className="text-gray-500">{value}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-gray-500 mt-3">
+            threshold {metrics.threshold.toFixed(3)} | candidates {metrics.candidateCount}
+          </p>
         </div>
       </div>
 

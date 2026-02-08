@@ -1,5 +1,8 @@
 import { InvalidTagIssue, MachineTagSemantics } from '../types';
 
+type MachineField = keyof MachineTagSemantics;
+export const TAG_VOCAB_VERSION = '2026-02-08';
+
 export const TAG_VOCAB: readonly string[] = [
   'requirements',
   'planning',
@@ -7,6 +10,8 @@ export const TAG_VOCAB: readonly string[] = [
   'tasks',
   'automation',
   'integration',
+  'repo',
+  'files',
   'api',
   'rest',
   'graphql',
@@ -18,7 +23,16 @@ export const TAG_VOCAB: readonly string[] = [
   'compliance',
   'risk',
   'audit',
+  'plan',
+  'spec',
+  'schema',
+  'code',
+  'patch',
   'tests',
+  'docs',
+  'config',
+  'report',
+  'pr',
   'debugging',
   'refactor',
   'performance',
@@ -42,6 +56,7 @@ export const TAG_VOCAB: readonly string[] = [
   'frontend',
   'backend',
   'database',
+  'db',
   'sql',
   'nosql',
   'vector-db',
@@ -53,7 +68,6 @@ export const TAG_VOCAB: readonly string[] = [
   'tooling',
   'cli',
   'scripts',
-  'docs',
   'readme',
   'changelog',
   'guides',
@@ -98,15 +112,112 @@ export const TAG_VOCAB: readonly string[] = [
 
 const VOCAB_SET = new Set(TAG_VOCAB);
 
+const ARTIFACT_INTERFACE_TAGS: readonly string[] = [
+  'plan',
+  'spec',
+  'schema',
+  'code',
+  'patch',
+  'tests',
+  'docs',
+  'config',
+  'report',
+  'pr',
+  'deploy',
+  'readme',
+  'changelog',
+];
+
+const ARTIFACT_INTERFACE_SET = new Set(ARTIFACT_INTERFACE_TAGS);
+
+const ARTIFACT_TAGS_ALLOWED = new Set<string>([
+  ...ARTIFACT_INTERFACE_TAGS,
+  'guides',
+  'templates',
+  'examples',
+  'diagram',
+  'scripts',
+  'export',
+  'csv',
+  'json',
+  'yaml',
+  'markdown',
+  'pdf',
+  'docx',
+  'pptx',
+  'image',
+  'video',
+  'audio',
+]);
+
+const INPUT_TAGS_ALLOWED = new Set<string>(TAG_VOCAB);
+const CAPABILITY_TAGS_ALLOWED = new Set<string>(TAG_VOCAB);
+
+const FIELD_ALLOWED: Record<MachineField, Set<string>> = {
+  inputsTags: INPUT_TAGS_ALLOWED,
+  artifactsTags: ARTIFACT_TAGS_ALLOWED,
+  capabilitiesTags: CAPABILITY_TAGS_ALLOWED,
+};
+
+const ARTIFACT_FIELD_AUTOCORRECT: Record<string, string> = {
+  workflow: 'plan',
+  planning: 'plan',
+  tasks: 'plan',
+  requirements: 'spec',
+  architecture: 'spec',
+  mermaid: 'diagram',
+  api: 'spec',
+  rest: 'spec',
+  graphql: 'spec',
+  webhook: 'spec',
+  frontend: 'code',
+  backend: 'code',
+  ui: 'spec',
+  ux: 'spec',
+  design: 'spec',
+  database: 'schema',
+  db: 'schema',
+  sql: 'schema',
+  nosql: 'schema',
+  'vector-db': 'schema',
+  llm: 'docs',
+  prompting: 'docs',
+  agents: 'docs',
+  mcp: 'config',
+  tooling: 'scripts',
+  cli: 'scripts',
+  automation: 'scripts',
+  'file-ops': 'scripts',
+  files: 'code',
+  'data-extraction': 'report',
+  'data-transform': 'report',
+  security: 'report',
+  privacy: 'report',
+  compliance: 'report',
+  risk: 'report',
+  audit: 'report',
+  validation: 'tests',
+  quality: 'tests',
+  observability: 'report',
+  monitoring: 'report',
+  logging: 'report',
+  github: 'pr',
+  jira: 'report',
+  notion: 'docs',
+  slack: 'report',
+  discord: 'report',
+  telegram: 'report',
+};
+
 const SYNONYM_TO_TAG: Record<string, string> = {
   requirement: 'requirements',
   requirements: 'requirements',
-  spec: 'requirements',
-  specs: 'requirements',
-  specification: 'requirements',
-  specifications: 'requirements',
-  prd: 'requirements',
-  roadmap: 'planning',
+  spec: 'spec',
+  specs: 'spec',
+  specification: 'spec',
+  specifications: 'spec',
+  prd: 'spec',
+  roadmap: 'plan',
   planning: 'planning',
   orchestration: 'workflow',
   pipeline: 'workflow',
@@ -116,9 +227,14 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   task: 'tasks',
   automation: 'automation',
   automations: 'automation',
+  integration: 'integration',
   integrations: 'integration',
   connector: 'integration',
   connectors: 'integration',
+  repository: 'repo',
+  repo: 'repo',
+  file: 'files',
+  files: 'files',
   endpoint: 'api',
   endpoints: 'api',
   http: 'rest',
@@ -135,6 +251,19 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   gdpr: 'compliance',
   hipaa: 'compliance',
   iso27001: 'compliance',
+  risk: 'risk',
+  audit: 'audit',
+  schema: 'schema',
+  schemas: 'schema',
+  implementation: 'code',
+  sourcecode: 'code',
+  source: 'code',
+  diff: 'patch',
+  patches: 'patch',
+  config: 'config',
+  configs: 'config',
+  configuration: 'config',
+  settings: 'config',
   test: 'tests',
   testing: 'tests',
   qa: 'tests',
@@ -143,6 +272,18 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   pytest: 'tests',
   playwright: 'tests',
   cypress: 'tests',
+  report: 'report',
+  reports: 'report',
+  summary: 'report',
+  pullrequest: 'pr',
+  merge: 'pr',
+  deploy: 'deploy',
+  deployment: 'deploy',
+  deployments: 'deploy',
+  release: 'deploy',
+  releases: 'deploy',
+  vercel: 'deploy',
+  netlify: 'deploy',
   debug: 'debugging',
   debugging: 'debugging',
   profiling: 'performance',
@@ -153,10 +294,6 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   cicd: 'ci-cd',
   ci: 'ci-cd',
   cd: 'ci-cd',
-  deployment: 'deploy',
-  deployments: 'deploy',
-  vercel: 'deploy',
-  netlify: 'deploy',
   container: 'docker',
   containers: 'docker',
   k8s: 'kubernetes',
@@ -169,9 +306,12 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   golang: 'go',
   frontend: 'frontend',
   backend: 'backend',
-  postgres: 'sql',
-  mysql: 'sql',
-  sqlite: 'sql',
+  database: 'database',
+  databases: 'database',
+  postgresql: 'db',
+  postgres: 'db',
+  mysql: 'db',
+  sqlite: 'db',
   mongo: 'nosql',
   mongodb: 'nosql',
   redis: 'nosql',
@@ -186,6 +326,7 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   mcpserver: 'mcp',
   mcpservers: 'mcp',
   modelcontextprotocol: 'mcp',
+  tool: 'tooling',
   tools: 'tooling',
   command: 'cli',
   commands: 'cli',
@@ -210,13 +351,11 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   ui: 'ui',
   a11y: 'accessibility',
   accessibility: 'accessibility',
-  search: 'seo',
   analytics: 'analytics',
   chart: 'dashboard',
   charts: 'dashboard',
   dashboard: 'dashboard',
-  report: 'reporting',
-  reports: 'reporting',
+  reporting: 'reporting',
   document: 'documents',
   documents: 'documents',
   doc: 'documents',
@@ -227,7 +366,6 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   tsv: 'csv',
   json: 'json',
   yml: 'yaml',
-  yaml: 'yaml',
   md: 'markdown',
   markdown: 'markdown',
   pdf: 'pdf',
@@ -253,7 +391,6 @@ const SYNONYM_TO_TAG: Record<string, string> = {
   github: 'github',
   jira: 'jira',
   filesystem: 'file-ops',
-  files: 'file-ops',
   extraction: 'data-extraction',
   parser: 'data-extraction',
   transform: 'data-transform',
@@ -264,16 +401,16 @@ const SYNONYM_TO_TAG: Record<string, string> = {
 };
 
 const COMPOUND_SYNONYMS: Array<{ phrase: string; tag: string }> = [
-  { phrase: 'requirements spec', tag: 'requirements' },
-  { phrase: 'spec requirements', tag: 'requirements' },
+  { phrase: 'requirements spec', tag: 'spec' },
   { phrase: 'mcp server', tag: 'mcp' },
   { phrase: 'model context protocol', tag: 'mcp' },
+  { phrase: 'pull request', tag: 'pr' },
+  { phrase: 'code patch', tag: 'patch' },
+  { phrase: 'output artifact', tag: 'report' },
+  { phrase: 'test suite', tag: 'tests' },
   { phrase: 'word document', tag: 'docx' },
   { phrase: 'power point', tag: 'pptx' },
-  { phrase: 'powerpoint slides', tag: 'pptx' },
   { phrase: 'slide deck', tag: 'pptx' },
-  { phrase: 'test jest', tag: 'tests' },
-  { phrase: 'deployment vercel', tag: 'deploy' },
 ];
 
 function normalizeTagToken(value: string): string {
@@ -323,9 +460,7 @@ function closestTagByTokenScore(normalized: string): string | null {
   let bestScore = 0;
 
   for (const tag of TAG_VOCAB) {
-    if (multiToken && tag.length <= 3) {
-      continue;
-    }
+    if (multiToken && tag.length <= 2) continue;
 
     const tagWords = tag.split('-');
     let score = 0;
@@ -353,7 +488,7 @@ function closestTagByTokenScore(normalized: string): string | null {
   if (compact.length < 5) return null;
 
   for (const tag of TAG_VOCAB) {
-    if (tag.length <= 3) continue;
+    if (tag.length <= 2) continue;
     const distance = levenshteinDistance(compact, tag.replace(/-/g, ''));
     if (distance < minDistance) {
       minDistance = distance;
@@ -365,7 +500,7 @@ function closestTagByTokenScore(normalized: string): string | null {
   return null;
 }
 
-function mapRawTag(rawTag: string): { mapped: string | null; issue: { rawTag: string; mappedTo?: string } | null } {
+function mapRawTag(rawTag: string): { mapped: string | null; issue: InvalidTagIssue | null } {
   const raw = String(rawTag ?? '').trim();
   if (!raw) return { mapped: null, issue: null };
 
@@ -376,14 +511,15 @@ function mapRawTag(rawTag: string): { mapped: string | null; issue: { rawTag: st
 
   const normalized = normalizeTagToken(raw);
   if (!normalized) {
-    return { mapped: null, issue: { rawTag: raw } };
+    return { mapped: null, issue: { field: 'inputsTags', rawTag: raw, reason: 'unknown_tag' } };
   }
 
   if (VOCAB_SET.has(normalized)) {
     return { mapped: normalized, issue: null };
   }
 
-  const exactSynonym = SYNONYM_TO_TAG[normalized.replace(/\s+/g, '')] || SYNONYM_TO_TAG[normalized];
+  const normalizedCompact = normalized.replace(/\s+/g, '');
+  const exactSynonym = SYNONYM_TO_TAG[normalizedCompact] || SYNONYM_TO_TAG[normalized];
   if (exactSynonym) {
     return { mapped: exactSynonym, issue: null };
   }
@@ -396,40 +532,62 @@ function mapRawTag(rawTag: string): { mapped: string | null; issue: { rawTag: st
 
   const parts = normalized.split(' ').filter(Boolean);
   for (const part of parts) {
+    if (VOCAB_SET.has(part)) {
+      return { mapped: part, issue: { field: 'inputsTags', rawTag: raw, mappedTo: part, reason: 'unknown_tag' } };
+    }
+
     const synonym = SYNONYM_TO_TAG[part];
     if (synonym) {
-      return { mapped: synonym, issue: { rawTag: raw, mappedTo: synonym } };
-    }
-    if (part.length >= 4 && VOCAB_SET.has(part)) {
-      return { mapped: part, issue: { rawTag: raw, mappedTo: part } };
+      return { mapped: synonym, issue: { field: 'inputsTags', rawTag: raw, mappedTo: synonym, reason: 'unknown_tag' } };
     }
   }
 
   const fuzzyMatch = closestTagByTokenScore(normalized);
   if (fuzzyMatch) {
-    return { mapped: fuzzyMatch, issue: { rawTag: raw, mappedTo: fuzzyMatch } };
+    return {
+      mapped: fuzzyMatch,
+      issue: { field: 'inputsTags', rawTag: raw, mappedTo: fuzzyMatch, reason: 'unknown_tag' },
+    };
   }
 
-  return { mapped: null, issue: { rawTag: raw } };
+  return { mapped: null, issue: { field: 'inputsTags', rawTag: raw, reason: 'unknown_tag' } };
 }
 
-function sanitizeTagField(
-  rawTags: string[],
-  field: keyof MachineTagSemantics,
-): { tags: string[]; issues: InvalidTagIssue[] } {
+function sanitizeTagField(rawTags: string[], field: MachineField): { tags: string[]; issues: InvalidTagIssue[] } {
   const result: string[] = [];
   const issues: InvalidTagIssue[] = [];
+  const allowed = FIELD_ALLOWED[field];
 
   for (const candidate of rawTags.slice(0, 24)) {
     const { mapped, issue } = mapRawTag(candidate);
-    if (mapped && !result.includes(mapped)) {
-      result.push(mapped);
+
+    if (mapped) {
+      if (!allowed.has(mapped)) {
+        if (field === 'artifactsTags') {
+          const corrected = ARTIFACT_FIELD_AUTOCORRECT[mapped];
+          if (corrected && allowed.has(corrected)) {
+            if (!result.includes(corrected)) {
+              result.push(corrected);
+            }
+            continue;
+          }
+        }
+
+        issues.push({
+          field,
+          rawTag: String(candidate),
+          mappedTo: mapped,
+          reason: 'field_not_allowed',
+        });
+      } else if (!result.includes(mapped)) {
+        result.push(mapped);
+      }
     }
+
     if (issue) {
       issues.push({
+        ...issue,
         field,
-        rawTag: issue.rawTag,
-        mappedTo: issue.mappedTo,
       });
     }
   }
@@ -460,4 +618,16 @@ export function sanitizeMachineTags(raw: Partial<MachineTagSemantics>): {
 
 export function tagVocabularyForPrompt(): string {
   return TAG_VOCAB.join(', ');
+}
+
+export function fieldTagVocabularyForPrompt(field: MachineField): string {
+  return Array.from(FIELD_ALLOWED[field]).sort().join(', ');
+}
+
+export function getArtifactInterfaceTags(): string[] {
+  return [...ARTIFACT_INTERFACE_TAGS];
+}
+
+export function isArtifactInterfaceTag(tag: string): boolean {
+  return ARTIFACT_INTERFACE_SET.has(normalizeTagToken(tag).replace(/\s+/g, '-'));
 }

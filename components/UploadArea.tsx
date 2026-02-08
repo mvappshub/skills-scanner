@@ -4,9 +4,11 @@ import { UploadCloud, Loader2, Upload, ShieldCheck, Search, FileText } from 'luc
 interface UploadAreaProps {
   onScan: (files: FileList) => Promise<void>;
   isScanning: boolean;
+  scanMode: 'merge' | 'full_rescan';
+  onScanModeChange: (mode: 'merge' | 'full_rescan') => void;
 }
 
-const UploadArea: React.FC<UploadAreaProps> = ({ onScan, isScanning }) => {
+const UploadArea: React.FC<UploadAreaProps> = ({ onScan, isScanning, scanMode, onScanModeChange }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -53,6 +55,30 @@ const UploadArea: React.FC<UploadAreaProps> = ({ onScan, isScanning }) => {
       </div>
 
       {/* Main Input Card (Mimics Claude's Prompt Area) */}
+      <div className="w-full max-w-2xl mb-4">
+        <div className="inline-flex items-center rounded-full border border-[#E5E4E0] bg-white p-1 shadow-sm">
+          <button
+            onClick={() => onScanModeChange('merge')}
+            className={`px-3 py-1.5 text-xs rounded-full ${
+              scanMode === 'merge' ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            Merge-only (No prune)
+          </button>
+          <button
+            onClick={() => onScanModeChange('full_rescan')}
+            className={`px-3 py-1.5 text-xs rounded-full ${
+              scanMode === 'full_rescan' ? 'bg-[#92400E] text-white' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            Full rescan (Prune library)
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-500 mt-2">
+          Active mode: {scanMode === 'merge' ? 'Merge-only keeps existing cached skills.' : 'Full rescan replaces cached library with current scan.'}
+        </p>
+      </div>
+
       <div 
         className={`w-full max-w-2xl transition-all duration-300 ease-out transform ${isDragging ? 'scale-[1.02]' : ''}`}
         onDragOver={handleDragOver}
