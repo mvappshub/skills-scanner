@@ -51,7 +51,7 @@ import {
 } from '../utils/workflowPlanSchema';
 import { computeSemanticsFingerprint, sha256Hex } from '../utils/fingerprints';
 import { getLlmClient } from '../utils/llm/client';
-import { getSemanticsModelId } from '../utils/llm/config';
+import { getSemanticsModelId, LLM_PROVIDER } from '../utils/llm/config';
 import {
   addWorkflowFeedback,
   deleteWorkflowTemplate,
@@ -107,6 +107,13 @@ interface WorkflowRunStepState {
 type WorkflowRunStateByStepId = Record<string, WorkflowRunStepState>;
 
 type DangerExportAction = 'markdown' | 'json';
+
+interface ArchitectPromptTemplate {
+  id: string;
+  label: string;
+  description: string;
+  input: WorkflowArchitectInput;
+}
 
 const PRESETS: Array<{ id: string; label: string; plan: WorkflowPlan }> = [
   {
@@ -186,6 +193,53 @@ const PRESETS: Array<{ id: string; label: string; plan: WorkflowPlan }> = [
     },
   },
 ];
+
+const ARCHITECT_PROMPT_TEMPLATES: ArchitectPromptTemplate[] = [
+  {
+    id: 'goal-to-workflow',
+    label: 'Build workflow from goal',
+    description: 'Turn a high-level goal into an ordered workflow plan.',
+    input: {
+      description:
+        'Goal: Build and ship a production-ready feature from requirements to release with QA and docs.',
+      workflowType: 'feature-delivery',
+      stack: 'react,node,typescript',
+      constraints: 'keep it KISS, include validation and rollout safety',
+    },
+  },
+  {
+    id: 'refine-granularity',
+    label: 'Refine step granularity',
+    description: 'Split broad steps into smaller, executable units with clear artifacts.',
+    input: {
+      description:
+        'Refine this workflow into smaller executable steps: architecture, API implementation, UI implementation, validation, release.',
+      workflowType: 'workflow-refinement',
+      stack: 'web',
+      constraints: 'each step should produce explicit artifacts and tags',
+    },
+  },
+  {
+    id: 'missing-skills-stubs',
+    label: 'Find missing skills + stubs',
+    description: 'Prioritize capability gaps and prepare stubs for missing skills.',
+    input: {
+      description:
+        'Analyze the workflow for missing capabilities, then prioritize missing skills and propose draft SKILL.md stubs.',
+      workflowType: 'skills-gap-analysis',
+      stack: 'agent-skills',
+      constraints: 'focus on missing tags, evidence-backed artifacts, and actionable drafts',
+    },
+  },
+];
+
+const DEMO_PROMPT_INPUT: WorkflowArchitectInput = {
+  description:
+    'Build a complete workflow for scanning skills, generating a workflow plan, assembling candidates, verifying missing tags, and exporting run artifacts.',
+  workflowType: 'skills-scanner-demo',
+  stack: 'react,vite,typescript',
+  constraints: 'KISS, show missing skills quickly, include verification and export',
+};
 
 const DEFAULT_WORKFLOW_PLAN: WorkflowPlan = parseWorkflowPlanJson(JSON.stringify(PRESETS[0].plan));
 
@@ -708,6 +762,8 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
   const [architectWarnings, setArchitectWarnings] = useState<WorkflowPlanNormalizationWarning[]>([]);
   const [architectRawPlan, setArchitectRawPlan] = useState<Partial<WorkflowPlan> | null>(null);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
+  const [lastPlanDurationMs, setLastPlanDurationMs] = useState<number | null>(null);
+  const [lastAssembleDurationMs, setLastAssembleDurationMs] = useState<number | null>(null);
   const [templates, setTemplates] = useState<WorkflowTemplateRecord[]>([]);
   const [templateName, setTemplateName] = useState('');
   const [templateDescription, setTemplateDescription] = useState('');
@@ -721,6 +777,9 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
   const [workflowRunImportError, setWorkflowRunImportError] = useState<string | null>(null);
   const [dangerGateAccepted, setDangerGateAccepted] = useState(false);
   const [pendingDangerExport, setPendingDangerExport] = useState<DangerExportAction | null>(null);
+  const [dangerConfirmCount, setDangerConfirmCount] = useState(0);
+  const [bridgeStatus, setBridgeStatus] = useState<'idle' | 'checking' | 'online' | 'offline'>('idle');
+  const [bridgeStatusDetail, setBridgeStatusDetail] = useState<string | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement>(null);
   const workflowRunImportInputRef = useRef<HTMLInputElement>(null);
 
@@ -819,6 +878,44 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     );
   };
 
+  const logQualityMetrics = (event: string, payload: Record<string, unknown>) => {
+    console.info('[quality]', {
+      event,
+      providerId: getLlmClient().providerId,
+      ...payload,
+    });
+  };
+
+  const countUnknownTagWarnings = (warnings: WorkflowPlanNormalizationWarning[]): number => {
+    return warnings.filter((warning) => warning.reason === 'unknown_tag').length;
+  };
+
+  const countDroppedArtifactsNoEvidence = (skillSet: SkillRecord[]): number => {
+    let count = 0;
+    for (const skill of skillSet) {
+      const issues = skill.semantics?.invalidTagIssues || [];
+      for (const issue of issues) {
+        if (issue.reason === 'artifact_evidence_missing') {
+          count += 1;
+        }
+      }
+    }
+    return count;
+  };
+
+  const countDangerSteps = (workflow: SkillWorkflowAssembly, skillSet: SkillRecord[]): number => {
+    const byId = new Map(skillSet.map((skill) => [skill.id, skill]));
+    let danger = 0;
+    for (const step of workflow.steps) {
+      const selectedSkillId = step.selected?.skillId;
+      if (!selectedSkillId) continue;
+      if (byId.get(selectedSkillId)?.riskLevel === 'danger') {
+        danger += 1;
+      }
+    }
+    return danger;
+  };
+
   const syncPlan = (
     nextPlan: WorkflowPlan,
     options?: { warnings?: WorkflowPlanNormalizationWarning[]; rawPlan?: Partial<WorkflowPlan> | null },
@@ -883,6 +980,64 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     setPendingDangerExport(null);
   }, [assembly]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const checkBridge = async () => {
+      if (LLM_PROVIDER !== 'claude-bridge') {
+        if (!cancelled) {
+          setBridgeStatus('idle');
+          setBridgeStatusDetail(null);
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setBridgeStatus((prev) => (prev === 'online' ? prev : 'checking'));
+      }
+
+      try {
+        const llm = getLlmClient();
+        if (!llm.healthCheck) {
+          if (!cancelled) {
+            setBridgeStatus('offline');
+            setBridgeStatusDetail('Healthcheck not available for current provider client.');
+          }
+          return;
+        }
+
+        const result = await llm.healthCheck();
+        if (cancelled) return;
+        if (result.ok) {
+          setBridgeStatus('online');
+          setBridgeStatusDetail(null);
+        } else {
+          setBridgeStatus('offline');
+          setBridgeStatusDetail(result.detail || 'Bridge healthcheck failed.');
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setBridgeStatus('offline');
+        setBridgeStatusDetail(error instanceof Error ? error.message : 'Bridge unavailable.');
+      }
+    };
+
+    void checkBridge();
+    if (LLM_PROVIDER === 'claude-bridge') {
+      timer = window.setInterval(() => {
+        void checkBridge();
+      }, 15000);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearInterval(timer);
+      }
+    };
+  }, []);
+
   const setArchitectField = (field: keyof WorkflowArchitectInput, value: string) => {
     setArchitectInput((prev) => ({
       ...prev,
@@ -890,27 +1045,60 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     }));
   };
 
-  const handleGeneratePlan = async () => {
-    const description = architectInput.description.trim();
+  const applyPromptTemplate = (template: ArchitectPromptTemplate) => {
+    setArchitectInput(template.input);
+    setArchitectError(null);
+    setFeedbackNotice(`Loaded prompt template: ${template.label}`);
+  };
+
+  const generatePlanWithInput = async (input: WorkflowArchitectInput) => {
+    const description = input.description.trim();
     if (!description) {
       setArchitectError('Describe workflow first.');
-      return;
+      return null;
     }
 
+    const startedAt = performance.now();
     setIsGeneratingPlan(true);
     setArchitectError(null);
     try {
-      const generated = await generateWorkflowPlanFromDescription(architectInput, { retries: 1 });
+      const generated = await generateWorkflowPlanFromDescription(input, { retries: 1 });
+      const durationMs = Math.round(performance.now() - startedAt);
+      setLastPlanDurationMs(durationMs);
       syncPlan(generated.plan, {
         warnings: generated.warnings,
         rawPlan: generated.rawPlan,
       });
       setTemplateName(generated.plan.name || '');
+      logQualityMetrics('plan_generated', {
+        timeToPlanMs: durationMs,
+        unknownTagsAfterNormalization: countUnknownTagWarnings(generated.warnings),
+        steps: generated.plan.steps.length,
+      });
+      return generated.plan;
     } catch (generationError) {
       setArchitectError(generationError instanceof Error ? generationError.message : 'Plan generation failed.');
+      return null;
     } finally {
       setIsGeneratingPlan(false);
     }
+  };
+
+  const handleGeneratePlan = async () => {
+    await generatePlanWithInput(architectInput);
+  };
+
+  const handleLoadDemoPrompt = () => {
+    setArchitectInput(DEMO_PROMPT_INPUT);
+    setArchitectError(null);
+    setFeedbackNotice('Loaded demo prompt. Click "Generate Plan" or "Load demo + run pipeline".');
+  };
+
+  const handleRunDemoPipeline = async () => {
+    setArchitectInput(DEMO_PROMPT_INPUT);
+    const plan = await generatePlanWithInput(DEMO_PROMPT_INPUT);
+    if (!plan) return;
+    await runAssembler(plan);
   };
 
   const makeTemplateId = () => {
@@ -1039,12 +1227,13 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     });
   };
 
-  const runAssembler = async () => {
-    if (planValidationError) {
+  const runAssembler = async (overridePlan?: WorkflowPlan) => {
+    if (!overridePlan && planValidationError) {
       setError(`Plan JSON is invalid: ${planValidationError}`);
       return;
     }
 
+    const assembleStartedAt = performance.now();
     setError(null);
     setIsAssembling(true);
     setLazyAnalyzedCount(0);
@@ -1056,7 +1245,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     setWorkflowRunImportError(null);
 
     try {
-      const plan = planDraft;
+      const plan = overridePlan ?? planDraft;
       let workingSkills = skills;
       let workingAnalyzed = workingSkills.filter((skill) => skill.semanticsStatus === 'ok');
       let workingGraph = effectiveGraph;
@@ -1132,6 +1321,20 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
       setSelectedStepId(firstStep?.stepId ?? null);
       setSelectedSkillId(firstStep?.selected?.skillId ?? firstStep?.alternatives[0]?.skillId ?? null);
       setTagOnlyMode(!graphReady);
+
+      const durationMs = Math.round(performance.now() - assembleStartedAt);
+      setLastAssembleDurationMs(durationMs);
+      const completeSteps = workflow.steps.filter((step) => step.missingCapabilities.length === 0).length;
+      const coveragePct = workflow.steps.length > 0 ? Math.round((completeSteps / workflow.steps.length) * 100) : 0;
+      logQualityMetrics('assemble', {
+        timeToPlanMs: lastPlanDurationMs,
+        timeToAssembleMs: durationMs,
+        assembledCoveragePct: coveragePct,
+        unknownTagsAfterNormalization: countUnknownTagWarnings(architectWarnings),
+        droppedArtifactsNoEvidence: countDroppedArtifactsNoEvidence(workingAnalyzed),
+        dangerSteps: countDangerSteps(workflow, assemblySkills),
+        dangerConfirmations: dangerConfirmCount,
+      });
     } catch (assembleError) {
       console.error('Workflow assemble failed:', assembleError);
       setAssembly(null);
@@ -1323,6 +1526,11 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
 
   const handleDangerGateContinue = () => {
     setDangerGateAccepted(true);
+    setDangerConfirmCount((prev) => {
+      const next = prev + 1;
+      logQualityMetrics('danger_confirmation', { dangerConfirmations: next });
+      return next;
+    });
     executeDangerExportAction(pendingDangerExport);
     setPendingDangerExport(null);
   };
@@ -1422,6 +1630,55 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
         <div className="bg-white rounded-xl border border-claude-border p-5 space-y-5">
           <div className="space-y-3">
             <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">Workflow Architect (LLM)</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleLoadDemoPrompt}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-[#D9D6CE] bg-white text-xs text-gray-700 hover:bg-[#F7F5EF]"
+              >
+                Load demo prompt
+              </button>
+              <button
+                onClick={() => void handleRunDemoPipeline()}
+                disabled={isGeneratingPlan || isAssembling}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[#2F6F53] text-white text-xs disabled:opacity-50"
+              >
+                Load demo + run demo pipeline
+              </button>
+              {LLM_PROVIDER === 'claude-bridge' ? (
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${
+                    bridgeStatus === 'online'
+                      ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
+                      : bridgeStatus === 'checking'
+                        ? 'bg-amber-50 border border-amber-200 text-amber-700'
+                        : 'bg-red-50 border border-red-200 text-red-700'
+                  }`}
+                >
+                  Bridge {bridgeStatus}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs bg-[#F3F1EC] border border-[#E6E2D7] text-gray-600">
+                  Provider: {LLM_PROVIDER}
+                </span>
+              )}
+              {LLM_PROVIDER === 'claude-bridge' && bridgeStatus !== 'online' ? (
+                <span className="text-xs text-red-700">
+                  Bridge offline. Run <code>npm run claude-bridge</code>.
+                </span>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {ARCHITECT_PROMPT_TEMPLATES.map((template) => (
+                <button
+                  key={template.id}
+                  onClick={() => applyPromptTemplate(template)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[#E6E4DD] bg-[#F9F8F5] text-xs text-gray-700 hover:bg-[#EFEDE8]"
+                  title={template.description}
+                >
+                  {template.label}
+                </button>
+              ))}
+            </div>
             <textarea
               value={architectInput.description}
               onChange={(event) => setArchitectField('description', event.target.value)}
@@ -1461,6 +1718,16 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                 <span className="text-xs text-red-700">Generation failed. Retry: {architectError}</span>
               ) : null}
             </div>
+            <div className="text-[11px] text-gray-500">
+              last time-to-plan: {lastPlanDurationMs !== null ? `${lastPlanDurationMs} ms` : '-'} · last
+              time-to-assemble: {lastAssembleDurationMs !== null ? `${lastAssembleDurationMs} ms` : '-'} · danger confirmations:{' '}
+              {dangerConfirmCount}
+            </div>
+            {LLM_PROVIDER === 'claude-bridge' && bridgeStatusDetail ? (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                {bridgeStatusDetail}
+              </div>
+            ) : null}
             {architectWarnings.length > 0 ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
                 <div className="text-xs font-semibold uppercase tracking-wider text-amber-800">

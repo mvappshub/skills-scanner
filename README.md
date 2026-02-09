@@ -70,3 +70,4 @@ npm run dev
 
 - Follow `docs/DEMO.md` for the end-to-end golden path:
   scan -> graph -> architect -> assemble -> missing tags -> export/import run -> draft generation.
+- Quality metrics are documented in `docs/QUALITY.md` and are logged in browser console with `[quality]`.
