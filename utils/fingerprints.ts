@@ -1,4 +1,5 @@
 import { SemanticsVersionMeta, SkillBundle } from '../types';
+import { getLlmClient } from './llm/client';
 import { normalizePath } from './bundleBuilder';
 import { SEMANTICS_LOGIC_VERSION, SEMANTICS_MODEL_ID, SEMANTICS_PROMPT_VERSION } from './semanticsAI';
 import { TAG_VOCAB_VERSION } from './tagVocabulary';
@@ -6,7 +7,9 @@ import { TAG_VOCAB_VERSION } from './tagVocabulary';
 export const SCANNER_VERSION = 'scanner-v1';
 
 export function makeSemanticsMeta(skillMdHash: string): SemanticsVersionMeta {
+  const llm = getLlmClient();
   return {
+    providerId: llm.providerId,
     modelId: SEMANTICS_MODEL_ID,
     promptVersion: SEMANTICS_PROMPT_VERSION,
     vocabVersion: TAG_VOCAB_VERSION,
@@ -64,6 +67,7 @@ export async function computeSemanticsFingerprint(meta: SemanticsVersionMeta): P
       meta.skillMdHash,
       meta.promptVersion,
       meta.vocabVersion,
+      meta.providerId,
       meta.modelId,
       meta.logicVersion,
     ].join('|'),

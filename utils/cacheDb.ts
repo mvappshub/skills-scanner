@@ -12,6 +12,7 @@ import {
   WorkflowFeedbackRecord,
   WorkflowTemplateRecord,
 } from '../types';
+import { getSemanticsModelId } from './llm/config';
 import { SEMANTICS_LOGIC_VERSION, SEMANTICS_MODEL_ID, SEMANTICS_PROMPT_VERSION } from './semanticsAI';
 import { TAG_VOCAB_VERSION } from './tagVocabulary';
 
@@ -27,6 +28,8 @@ const DEFAULT_WARNING_THRESHOLD_BYTES = 300 * 1024 * 1024;
 
 const SENSITIVE_KEY_PATTERN = /(api[_-]?key|token|secret|password|credential|private[_-]?key)/i;
 const INLINE_SECRET_PATTERN = /((api[_-]?key|token|secret|password)\s*[:=]\s*)([^,\s;]+)/gi;
+const LEGACY_PROVIDER_ID = 'gemini';
+const LEGACY_MODEL_ID = getSemanticsModelId('gemini');
 
 export interface SkillCacheRow {
   skillId: string;
@@ -136,7 +139,8 @@ function nowIso(): string {
 
 function defaultSemanticsMeta(skillMdHash = ''): SemanticsVersionMeta {
   return {
-    modelId: SEMANTICS_MODEL_ID,
+    providerId: LEGACY_PROVIDER_ID,
+    modelId: LEGACY_MODEL_ID,
     promptVersion: SEMANTICS_PROMPT_VERSION,
     vocabVersion: TAG_VOCAB_VERSION,
     logicVersion: SEMANTICS_LOGIC_VERSION,
@@ -222,7 +226,15 @@ function inferAnalysisStatus(semanticsStatus: SemanticsStatus, semantics: Semant
 
 function normalizeRow(raw: Partial<SkillCacheRow>): SkillCacheRow {
   const semanticsStatus = normalizeSemanticsStatus(raw.semanticsStatus);
-  const semanticsMeta = raw.semanticsMeta || defaultSemanticsMeta();
+  const incomingMeta = (raw.semanticsMeta || {}) as Partial<SemanticsVersionMeta>;
+  const semanticsMeta: SemanticsVersionMeta = {
+    providerId: String(incomingMeta.providerId || LEGACY_PROVIDER_ID),
+    modelId: String(incomingMeta.modelId || LEGACY_MODEL_ID),
+    promptVersion: String(incomingMeta.promptVersion || SEMANTICS_PROMPT_VERSION),
+    vocabVersion: String(incomingMeta.vocabVersion || TAG_VOCAB_VERSION),
+    logicVersion: String(incomingMeta.logicVersion || SEMANTICS_LOGIC_VERSION),
+    skillMdHash: String(incomingMeta.skillMdHash || ''),
+  };
 
   return {
     skillId: String(raw.skillId || ''),

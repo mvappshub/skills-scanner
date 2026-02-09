@@ -15,6 +15,22 @@ View your app in AI Studio: https://ai.studio/apps/drive/1ZVlt00iaBTlGD1WfCa8SEu
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Set provider in [.env.local](.env.local):
+   - `VITE_LLM_PROVIDER=gemini` (default) or `VITE_LLM_PROVIDER=claude-bridge`
+3. For Gemini mode, set `GEMINI_API_KEY` (or `VITE_GEMINI_API_KEY`) in `.env.local`
+4. Run the app:
    `npm run dev`
+
+## Claude Bridge Mode (local)
+
+1. Set server env vars (shell env or `.env`):
+   - `ANTHROPIC_API_KEY=<your_key>` (required)
+   - `CLAUDE_BRIDGE_PORT=3789` (optional)
+2. Start bridge:
+   - `npm run claude-bridge`
+3. In frontend `.env.local` set:
+   - `VITE_LLM_PROVIDER=claude-bridge`
+   - `VITE_CLAUDE_BRIDGE_URL=http://localhost:3789`
+
+Bridge healthcheck:
+- `GET http://localhost:3789/health` → `{ "ok": true }`

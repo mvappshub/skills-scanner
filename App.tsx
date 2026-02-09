@@ -93,6 +93,7 @@ function derivePendingReason(freshRecord: SkillRecord, cachedRow: SkillCacheRow)
 
   if (!cachedMeta) return 'skill_changed';
   if (cachedMeta.skillMdHash !== freshMeta.skillMdHash) return 'skill_changed';
+  if ((cachedMeta.providerId || 'gemini') !== freshMeta.providerId) return 'model_changed';
   if (cachedMeta.modelId !== freshMeta.modelId) return 'model_changed';
   if (cachedMeta.vocabVersion !== freshMeta.vocabVersion) return 'vocab_changed';
   if (cachedMeta.promptVersion !== freshMeta.promptVersion) return 'prompt_changed';

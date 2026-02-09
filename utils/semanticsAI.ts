@@ -1,32 +1,12 @@
 import { CategoryId, ConfidenceBasis, EvidencePack, Facts, InvalidTagIssue, MachineTagSemantics, Semantics, Stage } from '../types';
+import { getLlmClient } from './llm/client';
+import { getSemanticsModelId } from './llm/config';
 import { normalizeCategory } from './taxonomy';
 import { fieldTagVocabularyForPrompt, isArtifactInterfaceTag, sanitizeMachineTags, tagVocabularyForPrompt } from './tagVocabulary';
 
-export const SEMANTICS_MODEL_ID = 'gemini-2.5-flash';
+export const SEMANTICS_MODEL_ID = getSemanticsModelId();
 export const SEMANTICS_PROMPT_VERSION = 'p1-v1';
 export const SEMANTICS_LOGIC_VERSION = 'semantics-v1';
-
-async function loadGenAISDK() {
-  const module = await import('@google/genai');
-  return module;
-}
-
-async function getClient() {
-  const { GoogleGenAI } = await loadGenAISDK();
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error('Missing API key in process.env.API_KEY or process.env.GEMINI_API_KEY');
-  }
-
-  return new GoogleGenAI({ apiKey });
-}
-
-function cleanJson(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('```')) return trimmed;
-  return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
-}
 
 function fallbackSemantics(facts: Facts): Semantics {
   const inferredStage: Stage = facts.riskLevel === 'danger' ? 'security' : 'other';
@@ -106,6 +86,66 @@ function createPrompt(facts: Facts, evidence: EvidencePack, deep: boolean): stri
     `- Global canonical vocabulary reference: ${tagVocabularyForPrompt()}`,
   ].join('\n');
 }
+
+export const SEMANTICS_JSON_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    oneLiner: { type: 'string' },
+    stage: { type: 'string' },
+    humanReadable: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        inputsText: { type: 'array', items: { type: 'string' } },
+        artifactsText: { type: 'array', items: { type: 'string' } },
+        capabilitiesText: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['inputsText', 'artifactsText', 'capabilitiesText'],
+    },
+    machineTags: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        inputsTags: { type: 'array', items: { type: 'string' } },
+        artifactsTags: { type: 'array', items: { type: 'string' } },
+        capabilitiesTags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['inputsTags', 'artifactsTags', 'capabilitiesTags'],
+    },
+    prerequisites: { type: 'array', items: { type: 'string' } },
+    constraints: { type: 'array', items: { type: 'string' } },
+    sideEffects: { type: 'array', items: { type: 'string' } },
+    categoryId: { type: 'string' },
+    confidence: { type: 'number' },
+    confidenceBasis: { type: 'string' },
+    evidence: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          field: { type: 'string' },
+          quote: { type: 'string' },
+        },
+        required: ['field', 'quote'],
+      },
+    },
+  },
+  required: [
+    'oneLiner',
+    'stage',
+    'humanReadable',
+    'machineTags',
+    'prerequisites',
+    'constraints',
+    'sideEffects',
+    'categoryId',
+    'confidence',
+    'confidenceBasis',
+    'evidence',
+  ],
+};
 
 function normalizeTextList(values: unknown, limit = 8): string[] {
   if (!Array.isArray(values)) return [];
@@ -255,77 +295,10 @@ export async function extractSemantics(
   const deep = options.deep ?? false;
 
   try {
-    const { Type } = await loadGenAISDK();
-    const ai = await getClient();
-
-    const response = await ai.models.generateContent({
-      model: SEMANTICS_MODEL_ID,
-      contents: createPrompt(facts, evidence, deep),
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            oneLiner: { type: Type.STRING },
-            stage: { type: Type.STRING },
-            humanReadable: {
-              type: Type.OBJECT,
-              properties: {
-                inputsText: { type: Type.ARRAY, items: { type: Type.STRING } },
-                artifactsText: { type: Type.ARRAY, items: { type: Type.STRING } },
-                capabilitiesText: { type: Type.ARRAY, items: { type: Type.STRING } },
-              },
-              required: ['inputsText', 'artifactsText', 'capabilitiesText'],
-            },
-            machineTags: {
-              type: Type.OBJECT,
-              properties: {
-                inputsTags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                artifactsTags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                capabilitiesTags: { type: Type.ARRAY, items: { type: Type.STRING } },
-              },
-              required: ['inputsTags', 'artifactsTags', 'capabilitiesTags'],
-            },
-            prerequisites: { type: Type.ARRAY, items: { type: Type.STRING } },
-            constraints: { type: Type.ARRAY, items: { type: Type.STRING } },
-            sideEffects: { type: Type.ARRAY, items: { type: Type.STRING } },
-            categoryId: { type: Type.STRING },
-            confidence: { type: Type.NUMBER },
-            confidenceBasis: { type: Type.STRING },
-            evidence: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  field: { type: Type.STRING },
-                  quote: { type: Type.STRING },
-                },
-                required: ['field', 'quote'],
-              },
-            },
-          },
-          required: [
-            'oneLiner',
-            'stage',
-            'humanReadable',
-            'machineTags',
-            'prerequisites',
-            'constraints',
-            'sideEffects',
-            'categoryId',
-            'confidence',
-            'confidenceBasis',
-            'evidence',
-          ],
-        },
-      },
-    });
-
-    if (!response.text) {
-      throw new Error('Empty AI response');
-    }
-
-    const parsed = JSON.parse(cleanJson(response.text)) as Partial<Semantics> & {
+    const llm = getLlmClient();
+    const parsed = (await llm.generateSemantics(createPrompt(facts, evidence, deep), SEMANTICS_JSON_SCHEMA)) as Partial<
+      Semantics
+    > & {
       stage?: string;
       categoryId?: string;
       confidenceBasis?: string;

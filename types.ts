@@ -163,6 +163,7 @@ export interface Semantics {
 }
 
 export interface SemanticsVersionMeta {
+  providerId: string;
   modelId: string;
   promptVersion: string;
   vocabVersion: string;
