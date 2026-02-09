@@ -223,47 +223,66 @@ function hasAnyNeedle(haystack: string, needles: string[]): boolean {
 }
 
 const ARTIFACT_CONTEXT_HINTS = ['output', 'artifact', 'deliverable', 'generate', 'create', 'produce', 'file', 'document'];
+const OUTPUT_EVIDENCE_HINTS = [
+  'write',
+  'writes',
+  'written',
+  'create file',
+  'generate file',
+  'save file',
+  'output file',
+  'produces',
+  'exports',
+  'redirect',
+  'fs.write',
+  'touch ',
+  '> ',
+];
 
 function enforceArtifactsEvidence(
   artifactsTags: string[],
   artifactsText: string[],
-  inputsText: string[],
-  capabilitiesText: string[],
-  oneLiner: string,
-  evidence: Semantics['evidence'],
+  sourceEvidence: EvidencePack,
 ): { keptTags: string[]; issues: InvalidTagIssue[]; confidencePenalty: number } {
   if (!artifactsTags.length) {
     return { keptTags: [], issues: [], confidencePenalty: 0 };
   }
 
   const artifactsCorpus = artifactsText.join('\n');
-  const contextualCorpus = [oneLiner, ...inputsText, ...capabilitiesText].join('\n');
-  const evidenceCorpus = evidence
-    .map((item) => item.quote)
-    .join('\n');
-  const artifactFocusedEvidence = evidence
-    .filter(
-      (item) =>
-        (item.field || '').toLowerCase().includes('artifact') ||
-        hasAnyNeedle(item.quote, ARTIFACT_CONTEXT_HINTS),
-    )
-    .map((item) => item.quote)
-    .join('\n');
-  const strictCorpus = `${artifactsCorpus}\n${artifactFocusedEvidence}`;
-  const fallbackCorpus = `${contextualCorpus}\n${evidenceCorpus}`;
-  const hasArtifactContext = artifactsText.length > 0 || hasAnyNeedle(strictCorpus, ARTIFACT_CONTEXT_HINTS);
+  const sourceEvidenceCorpus = sourceEvidence.items
+    .map((item) => `${item.label}\n${item.content}`)
+    .join('\n\n');
+  const strictCorpus = `${sourceEvidenceCorpus}\n${artifactsCorpus}`;
+  const hasExplicitOutputEvidence = hasAnyNeedle(sourceEvidenceCorpus, OUTPUT_EVIDENCE_HINTS);
+  const hasArtifactContext =
+    artifactsText.length > 0 ||
+    hasAnyNeedle(sourceEvidenceCorpus, ARTIFACT_CONTEXT_HINTS) ||
+    hasAnyNeedle(sourceEvidenceCorpus, OUTPUT_EVIDENCE_HINTS);
 
   const keptTags: string[] = [];
   const issues: InvalidTagIssue[] = [];
 
+  if (!hasExplicitOutputEvidence) {
+    for (const tag of artifactsTags) {
+      issues.push({
+        field: 'artifactsTags',
+        rawTag: tag,
+        mappedTo: tag,
+        reason: 'artifact_evidence_missing',
+      });
+    }
+
+    return {
+      keptTags: [],
+      issues,
+      confidencePenalty: Math.min(0.2, artifactsTags.length * 0.05),
+    };
+  }
+
   for (const tag of artifactsTags) {
     const hints = ARTIFACT_TAG_EVIDENCE_HINTS[tag] ?? [tag.replace(/-/g, ' ')];
     const supportedStrict = hasAnyNeedle(strictCorpus, hints);
-    const supportedFallback =
-      !supportedStrict &&
-      isArtifactInterfaceTag(tag) &&
-      hasArtifactContext &&
-      hasAnyNeedle(fallbackCorpus, hints);
+    const supportedFallback = !supportedStrict && isArtifactInterfaceTag(tag) && hasArtifactContext;
 
     if (supportedStrict || supportedFallback) {
       keptTags.push(tag);
@@ -324,10 +343,7 @@ export async function extractSemantics(
     const artifactEvidence = enforceArtifactsEvidence(
       mergedMachineTags.artifactsTags,
       humanReadable.artifactsText,
-      humanReadable.inputsText,
-      humanReadable.capabilitiesText,
-      parsed.oneLiner?.trim() || '',
-      Array.isArray(parsed.evidence) ? parsed.evidence.slice(0, 12) : [],
+      evidence,
     );
 
     const machineTags: MachineTagSemantics = {

@@ -6,6 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 dotenv.config();
 
 const PORT = Number(process.env.CLAUDE_BRIDGE_PORT || 3789);
+const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_BRIDGE_TIMEOUT_MS || 60000);
 const DEFAULT_MODEL = process.env.CLAUDE_MODEL_ID || 'claude-3-5-sonnet-latest';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const allowedOrigins = (process.env.CLAUDE_BRIDGE_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
@@ -24,7 +25,7 @@ const app = express();
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
         return;
       }
@@ -54,33 +55,151 @@ function assertGeneratePayload(body) {
   return { prompt, schema, modelId: modelId || undefined };
 }
 
+function extractFirstJsonObject(text) {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          return text.slice(start, index + 1);
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseJsonObjectFromText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Try object substring fallback below.
+  }
+
+  const candidate = extractFirstJsonObject(trimmed);
+  if (!candidate) return null;
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 async function generateStrictJson({ prompt, schema, modelId }) {
-  const response = await anthropic.messages.create({
-    model: modelId || DEFAULT_MODEL,
-    max_tokens: 4096,
-    temperature: 0,
-    tools: [
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), REQUEST_TIMEOUT_MS);
+  let response;
+
+  try {
+    response = await anthropic.messages.create(
       {
-        name: 'submit_json',
-        description: 'Return JSON that strictly matches the provided JSON schema.',
-        input_schema: schema,
+        model: modelId || DEFAULT_MODEL,
+        max_tokens: 4096,
+        temperature: 0,
+        output_config: {
+          format: {
+            type: 'json_schema',
+            schema,
+          },
+        },
+        messages: [{ role: 'user', content: prompt }],
       },
-    ],
-    tool_choice: { type: 'tool', name: 'submit_json' },
-    messages: [{ role: 'user', content: prompt }],
-  });
-
-  const toolUse = response.content.find((block) => block.type === 'tool_use' && block.name === 'submit_json');
-  if (!toolUse) {
-    throw new Error('Claude did not return structured tool output.');
+      { signal: abortController.signal },
+    );
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      const timeoutError = new Error(`Claude request timed out after ${REQUEST_TIMEOUT_MS} ms.`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 
-  const payload = toolUse.input;
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('Claude returned invalid structured payload.');
+  for (const block of response.content || []) {
+    if (block?.type === 'output_json' && block.json && typeof block.json === 'object' && !Array.isArray(block.json)) {
+      return block.json;
+    }
+
+    if (block?.type === 'text' && typeof block.text === 'string') {
+      const parsed = parseJsonObjectFromText(block.text);
+      if (parsed) {
+        return parsed;
+      }
+    }
   }
 
-  return payload;
+  throw new Error('Claude returned invalid structured JSON payload.');
+}
+
+function toClientError(error) {
+  const isTimeout = error?.name === 'AbortError' || error?.name === 'TimeoutError';
+  const status = typeof error?.status === 'number' ? error.status : undefined;
+  const code =
+    typeof error?.error?.error?.type === 'string'
+      ? error.error.error.type
+      : typeof error?.error?.type === 'string'
+        ? error.error.type
+        : undefined;
+  const upstreamMessage =
+    typeof error?.error?.error?.message === 'string'
+      ? error.error.error.message
+      : typeof error?.error?.message === 'string'
+        ? error.error.message
+        : undefined;
+  const message = upstreamMessage || (status ? 'Upstream request failed.' : error instanceof Error ? error.message : 'Unknown bridge error');
+  return {
+    statusCode: isTimeout ? 504 : 500,
+    ok: false,
+    error: status ? `Claude API error (${status}${code ? `/${code}` : ''}): ${message}` : message,
+  };
 }
 
 app.get('/health', (_req, res) => {
@@ -93,8 +212,8 @@ app.post('/generate/semantics', async (req, res) => {
     const result = await generateStrictJson(payload);
     res.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown bridge error';
-    res.status(500).json({ error: message });
+    const payload = toClientError(error);
+    res.status(payload.statusCode).json({ ok: false, error: payload.error });
   }
 });
 
@@ -104,12 +223,11 @@ app.post('/generate/workflow', async (req, res) => {
     const result = await generateStrictJson(payload);
     res.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown bridge error';
-    res.status(500).json({ error: message });
+    const payload = toClientError(error);
+    res.status(payload.statusCode).json({ ok: false, error: payload.error });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`[claude-bridge] Listening on http://localhost:${PORT}`);
 });
-

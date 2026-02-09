@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import {
   AnalyzeProgress,
+  PendingReason,
   SkillGraph,
   SkillRecord,
   Stage,
@@ -42,11 +43,15 @@ import {
   parseTagsInput,
   parseWorkflowPlanJson,
   parseWorkflowPlanJsonWithVocab,
+  normalizeWorkflowPlanWithVocab,
   tagsToCsv,
   type WorkflowPlanNormalizationWarning,
   WORKFLOW_STAGES,
   workflowPlanToJson,
 } from '../utils/workflowPlanSchema';
+import { computeSemanticsFingerprint, sha256Hex } from '../utils/fingerprints';
+import { getLlmClient } from '../utils/llm/client';
+import { getSemanticsModelId } from '../utils/llm/config';
 import {
   addWorkflowFeedback,
   deleteWorkflowTemplate,
@@ -56,6 +61,8 @@ import {
   listWorkflowTemplates,
   saveWorkflowTemplate,
 } from '../utils/cacheDb';
+import { SEMANTICS_LOGIC_VERSION, SEMANTICS_PROMPT_VERSION } from '../utils/semanticsAI';
+import { TAG_VOCAB_VERSION } from '../utils/tagVocabulary';
 
 interface WorkflowPanelProps {
   skills: SkillRecord[];
@@ -89,6 +96,17 @@ interface SkillDraftPreview {
   constraints: string[];
   skillMd: string;
 }
+
+type WorkflowRunStepStatus = 'todo' | 'done' | 'failed';
+
+interface WorkflowRunStepState {
+  status: WorkflowRunStepStatus;
+  note: string;
+}
+
+type WorkflowRunStateByStepId = Record<string, WorkflowRunStepState>;
+
+type DangerExportAction = 'markdown' | 'json';
 
 const PRESETS: Array<{ id: string; label: string; plan: WorkflowPlan }> = [
   {
@@ -451,6 +469,99 @@ function mergeSkills(baseSkills: SkillRecord[], updates: SkillRecord[]): SkillRe
   return baseSkills.map((skill) => byId.get(skill.id) ?? skill);
 }
 
+function defaultRunStepState(): WorkflowRunStepState {
+  return { status: 'todo', note: '' };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeRunStateForPlan(
+  plan: WorkflowPlan,
+  rawState: unknown,
+): WorkflowRunStateByStepId {
+  const normalized: WorkflowRunStateByStepId = {};
+  const source = isObjectRecord(rawState) ? rawState : {};
+
+  for (const [index, step] of plan.steps.entries()) {
+    const stepId = planStepId(step, index);
+    const rawEntry = source[stepId];
+    if (!isObjectRecord(rawEntry)) {
+      normalized[stepId] = defaultRunStepState();
+      continue;
+    }
+
+    const rawStatus = rawEntry.status;
+    const status: WorkflowRunStepStatus =
+      rawStatus === 'done' || rawStatus === 'failed' ? rawStatus : 'todo';
+    const note = typeof rawEntry.note === 'string' ? rawEntry.note : '';
+    normalized[stepId] = { status, note };
+  }
+
+  return normalized;
+}
+
+interface StaleSkillCandidate {
+  skillId: string;
+  reason: PendingReason;
+}
+
+async function detectStaleSkills(skills: SkillRecord[]): Promise<StaleSkillCandidate[]> {
+  const staleBySkillId = new Map<string, PendingReason>();
+  const llm = getLlmClient();
+  const expectedProviderId = llm.providerId;
+  const expectedModelId = getSemanticsModelId(expectedProviderId);
+
+  for (const skill of skills) {
+    if (skill.semanticsStatus !== 'ok') continue;
+
+    try {
+      if ((skill.semanticsMeta.providerId || 'gemini') !== expectedProviderId) {
+        staleBySkillId.set(skill.id, 'model_changed');
+        continue;
+      }
+
+      if (skill.semanticsMeta.modelId !== expectedModelId) {
+        staleBySkillId.set(skill.id, 'model_changed');
+        continue;
+      }
+
+      if (skill.semanticsMeta.promptVersion !== SEMANTICS_PROMPT_VERSION) {
+        staleBySkillId.set(skill.id, 'prompt_changed');
+        continue;
+      }
+
+      if (skill.semanticsMeta.vocabVersion !== TAG_VOCAB_VERSION) {
+        staleBySkillId.set(skill.id, 'vocab_changed');
+        continue;
+      }
+
+      if (skill.semanticsMeta.logicVersion !== SEMANTICS_LOGIC_VERSION) {
+        staleBySkillId.set(skill.id, 'logic_changed');
+        continue;
+      }
+
+      const expectedSemanticsFingerprint = await computeSemanticsFingerprint(skill.semanticsMeta);
+      if (expectedSemanticsFingerprint !== skill.semanticsFingerprint) {
+        staleBySkillId.set(skill.id, 'skill_changed');
+        continue;
+      }
+
+      if (skill.rawSkillContent) {
+        const currentSkillHash = await sha256Hex(skill.rawSkillContent);
+        if (currentSkillHash !== skill.semanticsMeta.skillMdHash) {
+          staleBySkillId.set(skill.id, 'skill_changed');
+        }
+      }
+    } catch {
+      staleBySkillId.set(skill.id, 'skill_changed');
+    }
+  }
+
+  return Array.from(staleBySkillId.entries()).map(([skillId, reason]) => ({ skillId, reason }));
+}
+
 function planStepId(step: WorkflowPlan['steps'][number], index: number): string {
   return step.id || `step-${index + 1}`;
 }
@@ -491,6 +602,7 @@ function buildWorkflowChecklistMarkdown(args: {
   assembly: SkillWorkflowAssembly;
   tagOnlyMode: boolean;
   skillsById: Map<string, SkillRecord>;
+  runStateByStepId: WorkflowRunStateByStepId;
 }): string {
   const now = new Date().toISOString();
   const title = args.plan?.name || args.plan?.id || 'Workflow checklist';
@@ -513,9 +625,11 @@ function buildWorkflowChecklistMarkdown(args: {
     const overlap = step.overlapTags.length > 0 ? step.overlapTags.join(', ') : '-';
     const missing = step.missingCapabilities.length > 0 ? step.missingCapabilities.join(', ') : '-';
     const selected = step.selected;
+    const runState = args.runStateByStepId[step.stepId] || defaultRunStepState();
 
     lines.push(`### ${index + 1}. [ ] ${markdownSafe(step.title)} (\`${step.stage}\`)`);
     lines.push('');
+    lines.push(`- Run status: ${runState.status}${runState.note ? ` (${markdownSafe(runState.note)})` : ''}`);
     if (selected) {
       lines.push(`- Selected skill: \`${markdownSafe(selected.name)}\` (\`${selected.skillId}\`)`);
       lines.push(`- Score/confidence: ${selected.score.toFixed(2)} / ${Math.round(selected.confidence * 100)}%`);
@@ -579,6 +693,9 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
   const [lazyAnalyzedCount, setLazyAnalyzedCount] = useState(0);
   const [lazyAnalyzePlanned, setLazyAnalyzePlanned] = useState(0);
   const [lazyAnalyzeFailed, setLazyAnalyzeFailed] = useState(0);
+  const [staleRevalidationPlanned, setStaleRevalidationPlanned] = useState(0);
+  const [staleRevalidatedCount, setStaleRevalidatedCount] = useState(0);
+  const [staleRevalidationFailed, setStaleRevalidationFailed] = useState(0);
   const [isAssembling, setIsAssembling] = useState(false);
   const [graphOverride, setGraphOverride] = useState<SkillGraph | null>(null);
   const [architectInput, setArchitectInput] = useState<WorkflowArchitectInput>({
@@ -598,7 +715,14 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
   const [feedbackEntries, setFeedbackEntries] = useState<WorkflowFeedbackRecord[]>([]);
   const [feedbackBusyKey, setFeedbackBusyKey] = useState<string | null>(null);
   const [feedbackNotice, setFeedbackNotice] = useState<string | null>(null);
+  const [runStateByStepId, setRunStateByStepId] = useState<WorkflowRunStateByStepId>(
+    () => normalizeRunStateForPlan(DEFAULT_WORKFLOW_PLAN, {}),
+  );
+  const [workflowRunImportError, setWorkflowRunImportError] = useState<string | null>(null);
+  const [dangerGateAccepted, setDangerGateAccepted] = useState(false);
+  const [pendingDangerExport, setPendingDangerExport] = useState<DangerExportAction | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement>(null);
+  const workflowRunImportInputRef = useRef<HTMLInputElement>(null);
 
   const analyzedSkills = useMemo(() => skills.filter((skill) => skill.semanticsStatus === 'ok'), [skills]);
   const pendingSkills = useMemo(() => skills.filter((skill) => skill.semanticsStatus !== 'ok'), [skills]);
@@ -625,6 +749,30 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     [assembly, selectedStepId],
   );
   const selectedStepLockedSkillId = selectedStep ? lockedSkillByStepId[selectedStep.stepId] || null : null;
+  const selectedStepRunState = selectedStep ? runStateByStepId[selectedStep.stepId] ?? defaultRunStepState() : null;
+  const hasDangerSelection = useMemo(
+    () =>
+      Boolean(
+        assembly?.steps.some((step) => {
+          const skillId = step.selected?.skillId;
+          if (!skillId) return false;
+          return skillsById.get(skillId)?.riskLevel === 'danger';
+        }),
+      ),
+    [assembly, skillsById],
+  );
+  const runStateSummary = useMemo(() => {
+    const entries = Object.values(runStateByStepId);
+    let todo = 0;
+    let done = 0;
+    let failed = 0;
+    for (const entry of entries) {
+      if (entry.status === 'done') done += 1;
+      else if (entry.status === 'failed') failed += 1;
+      else todo += 1;
+    }
+    return { todo, done, failed };
+  }, [runStateByStepId]);
 
   const selectedCandidate = useMemo(() => {
     if (!selectedStep) return null;
@@ -722,6 +870,18 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
       Object.fromEntries(Object.entries(prev).filter(([stepId]) => validStepIds.has(stepId))),
     );
   }, [planDraft.steps]);
+
+  useEffect(() => {
+    setRunStateByStepId((prev) => {
+      const next = normalizeRunStateForPlan(planDraft, prev);
+      return next;
+    });
+  }, [planDraft]);
+
+  useEffect(() => {
+    setDangerGateAccepted(false);
+    setPendingDangerExport(null);
+  }, [assembly]);
 
   const setArchitectField = (field: keyof WorkflowArchitectInput, value: string) => {
     setArchitectInput((prev) => ({
@@ -890,6 +1050,10 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     setLazyAnalyzedCount(0);
     setLazyAnalyzePlanned(0);
     setLazyAnalyzeFailed(0);
+    setStaleRevalidationPlanned(0);
+    setStaleRevalidatedCount(0);
+    setStaleRevalidationFailed(0);
+    setWorkflowRunImportError(null);
 
     try {
       const plan = planDraft;
@@ -897,6 +1061,39 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
       let workingAnalyzed = workingSkills.filter((skill) => skill.semanticsStatus === 'ok');
       let workingGraph = effectiveGraph;
       let graphReady = workingAnalyzed.length > 0;
+
+      const staleSkills = await detectStaleSkills(workingSkills);
+      if (staleSkills.length > 0) {
+        const staleReasonBySkillId = new Map(staleSkills.map((entry) => [entry.skillId, entry.reason]));
+        const staleSet = new Set(staleSkills.map((entry) => entry.skillId));
+        workingSkills = workingSkills.map((skill) =>
+          staleSet.has(skill.id)
+            ? {
+                ...skill,
+                semanticsStatus: 'pending',
+                pendingReason: staleReasonBySkillId.get(skill.id) || 'skill_changed',
+              }
+            : skill,
+        );
+        setStaleRevalidationPlanned(staleSkills.length);
+        setFeedbackNotice(
+          `Detected ${staleSkills.length} stale skill fingerprint(s). Revalidating with Pass2 before assemble...`,
+        );
+
+        const staleResult = await onAnalyzeSkillIds(
+          staleSkills.map((entry) => entry.skillId),
+          'pass2',
+          { batchSize: 8 },
+        );
+        setStaleRevalidatedCount(staleResult.succeeded);
+        setStaleRevalidationFailed(staleResult.failed);
+
+        workingSkills = mergeSkills(workingSkills, staleResult.updated);
+        workingAnalyzed = workingSkills.filter((skill) => skill.semanticsStatus === 'ok');
+        workingGraph = buildSkillGraph(workingAnalyzed);
+        graphReady = workingAnalyzed.length > 0;
+        setGraphOverride(workingGraph);
+      }
 
       if (workingAnalyzed.length === 0 || (pendingSkills.length > 0 && warmCacheCoverage < 0.8)) {
         const lazyCandidates = pickLazyCandidates(plan, pendingSkills, LAZY_ANALYZE_LIMIT);
@@ -1084,10 +1281,112 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
       assembly,
       tagOnlyMode,
       skillsById,
+      runStateByStepId,
     });
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const seed = markdownFilenameSeed(activePlan?.name || activePlan?.id || 'workflow');
     downloadText(`${seed}-checklist-${stamp}.md`, markdown);
+  };
+
+  const handleExportWorkflowRunJson = () => {
+    if (!assembly) return;
+    exportJson(`assembled-workflow-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`, {
+      workflowPlan: activePlan || planDraft,
+      skillWorkflow: assembly,
+      lockedSkillByStepId,
+      runStateByStepId,
+      mode: tagOnlyMode ? 'tag-only' : 'graph+tags',
+    });
+  };
+
+  const withDangerGate = (action: DangerExportAction, callback: () => void) => {
+    if (!hasDangerSelection || dangerGateAccepted) {
+      callback();
+      return;
+    }
+
+    setPendingDangerExport(action);
+  };
+
+  const executeDangerExportAction = (action: DangerExportAction | null) => {
+    if (!action) return;
+    if (action === 'markdown') {
+      handleExportWorkflowMarkdown();
+      return;
+    }
+    handleExportWorkflowRunJson();
+  };
+
+  const handleDangerGateCancel = () => {
+    setPendingDangerExport(null);
+  };
+
+  const handleDangerGateContinue = () => {
+    setDangerGateAccepted(true);
+    executeDangerExportAction(pendingDangerExport);
+    setPendingDangerExport(null);
+  };
+
+  const updateRunStepStatus = (stepId: string, status: WorkflowRunStepStatus) => {
+    setRunStateByStepId((prev) => ({
+      ...prev,
+      [stepId]: {
+        ...(prev[stepId] || defaultRunStepState()),
+        status,
+      },
+    }));
+  };
+
+  const updateRunStepNote = (stepId: string, note: string) => {
+    setRunStateByStepId((prev) => ({
+      ...prev,
+      [stepId]: {
+        ...(prev[stepId] || defaultRunStepState()),
+        note,
+      },
+    }));
+  };
+
+  const handleImportWorkflowRun = async (file: File) => {
+    const text = await file.text();
+    const payload = JSON.parse(text) as unknown;
+    if (!isObjectRecord(payload) || !payload.workflowPlan) {
+      throw new Error('Invalid workflow run JSON: missing workflowPlan');
+    }
+
+    const normalizedPlan = normalizeWorkflowPlanWithVocab(payload.workflowPlan as Partial<WorkflowPlan>);
+    syncPlan(normalizedPlan.plan, {
+      warnings: normalizedPlan.warnings,
+      rawPlan: normalizedPlan.rawPlan,
+    });
+
+    const importedLocks = isObjectRecord(payload.lockedSkillByStepId) ? payload.lockedSkillByStepId : {};
+    const nextLocks: Record<string, string> = {};
+    for (const [stepId, skillId] of Object.entries(importedLocks)) {
+      if (typeof skillId === 'string' && skillId.trim()) {
+        nextLocks[stepId] = skillId.trim();
+      }
+    }
+
+    setLockedSkillByStepId(nextLocks);
+    setRunStateByStepId(normalizeRunStateForPlan(normalizedPlan.plan, payload.runStateByStepId));
+    if (isObjectRecord(payload.skillWorkflow) && Array.isArray(payload.skillWorkflow.steps)) {
+      const importedAssembly = payload.skillWorkflow as SkillWorkflowAssembly;
+      setAssembly(importedAssembly);
+      const firstStep = importedAssembly.steps[0] ?? null;
+      setSelectedStepId(firstStep?.stepId ?? null);
+      setSelectedSkillId(firstStep?.selected?.skillId ?? firstStep?.alternatives[0]?.skillId ?? null);
+      const importedMode = payload.mode === 'tag-only';
+      setTagOnlyMode(importedMode);
+      setActivePlan(normalizedPlan.plan);
+    } else {
+      setAssembly(null);
+      setActivePlan(null);
+      setSelectedStepId(null);
+      setSelectedSkillId(null);
+    }
+    setWorkflowRunImportError(null);
+    setFeedbackNotice('Workflow run imported. You can continue from saved run state and locked steps.');
   };
 
   return (
@@ -1103,25 +1402,18 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
           {assembly ? (
             <div className="flex items-center gap-2">
               <button
-                onClick={handleExportWorkflowMarkdown}
+                onClick={() => withDangerGate('markdown', handleExportWorkflowMarkdown)}
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-[#D9D6CE] bg-white text-gray-800 text-sm hover:bg-[#F7F5EF]"
               >
                 <Download size={14} />
                 Export Markdown checklist
               </button>
               <button
-                onClick={() =>
-                  exportJson(`assembled-workflow-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`, {
-                    workflowPlan: activePlan,
-                    skillWorkflow: assembly,
-                    lockedSkillByStepId,
-                    mode: tagOnlyMode ? 'tag-only' : 'graph+tags',
-                  })
-                }
+                onClick={() => withDangerGate('json', handleExportWorkflowRunJson)}
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-gray-900 text-white text-sm hover:bg-gray-800"
               >
                 <Download size={14} />
-                Export Workflow JSON
+                Export Workflow Run JSON
               </button>
             </div>
           ) : null}
@@ -1241,6 +1533,13 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                 <Upload size={12} />
                 Import templates
               </button>
+              <button
+                onClick={() => workflowRunImportInputRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2.5 py-2 rounded-md border border-[#D9D6CE] bg-white text-xs text-gray-700"
+              >
+                <Upload size={12} />
+                Import run JSON
+              </button>
               <input
                 ref={templateImportInputRef}
                 type="file"
@@ -1250,6 +1549,20 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                   const file = event.target.files?.[0];
                   if (!file) return;
                   void handleImportTemplates(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+              <input
+                ref={workflowRunImportInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  void handleImportWorkflowRun(file).catch((importError) => {
+                    setWorkflowRunImportError(importError instanceof Error ? importError.message : 'Import failed.');
+                  });
                   event.currentTarget.value = '';
                 }}
               />
@@ -1413,6 +1726,15 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
             <span>
               Warm-cache coverage: {Math.round(warmCacheCoverage * 100)}% ({analyzedSkills.length}/{skills.length || 0})
             </span>
+            <span>
+              Run state: {runStateSummary.done} done / {runStateSummary.failed} failed / {runStateSummary.todo} todo
+            </span>
+            {staleRevalidationPlanned > 0 ? (
+              <span>
+                Stale revalidated: {staleRevalidatedCount}/{staleRevalidationPlanned}
+                {staleRevalidationFailed > 0 ? ` (${staleRevalidationFailed} failed)` : ''}
+              </span>
+            ) : null}
             {lazyAnalyzePlanned > 0 ? (
               <span>
                 Lazy analyzed: {lazyAnalyzedCount}/{lazyAnalyzePlanned}
@@ -1426,6 +1748,9 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
             ) : null}
           </div>
           {error ? <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div> : null}
+          {workflowRunImportError ? (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{workflowRunImportError}</div>
+          ) : null}
           {feedbackNotice ? (
             <div className="text-sm text-gray-700 bg-[#F6F5F2] border border-[#E5E2DA] rounded px-3 py-2">{feedbackNotice}</div>
           ) : null}
@@ -1441,6 +1766,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                 {assembly.steps.map((step, index) => {
                   const isActive = step.stepId === (selectedStep?.stepId ?? selectedStepId);
                   const hasMissing = step.missingCapabilities.length > 0;
+                  const runState = runStateByStepId[step.stepId] || defaultRunStepState();
                   return (
                     <button
                       key={step.stepId}
@@ -1472,6 +1798,17 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                             locked
                           </span>
                         ) : null}
+                        <span
+                          className={`${
+                            runState.status === 'done'
+                              ? 'text-emerald-700'
+                              : runState.status === 'failed'
+                                ? 'text-red-700'
+                                : 'text-gray-500'
+                          }`}
+                        >
+                          {runState.status}
+                        </span>
                       </div>
                       <div className="mt-2 space-y-1">
                         <div className="text-[11px] text-gray-600">
@@ -1512,6 +1849,25 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                   <div className="text-[11px] text-amber-700 mt-0.5">
                     missing: {selectedStep.missingCapabilities.length > 0 ? selectedStep.missingCapabilities.join(', ') : '-'}
                   </div>
+                  {selectedStepRunState ? (
+                    <div className="mt-2 grid grid-cols-1 md:grid-cols-[130px_1fr] gap-2">
+                      <select
+                        value={selectedStepRunState.status}
+                        onChange={(event) => updateRunStepStatus(selectedStep.stepId, event.target.value as WorkflowRunStepStatus)}
+                        className="rounded border border-[#E6E4DD] bg-white text-xs p-1.5"
+                      >
+                        <option value="todo">todo</option>
+                        <option value="done">done</option>
+                        <option value="failed">failed</option>
+                      </select>
+                      <input
+                        value={selectedStepRunState.note}
+                        onChange={(event) => updateRunStepNote(selectedStep.stepId, event.target.value)}
+                        placeholder="Run note (optional)"
+                        className="rounded border border-[#E6E4DD] bg-white text-xs p-1.5"
+                      />
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="space-y-3">
@@ -1791,6 +2147,36 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
           </div>
         ) : null}
       </div>
+
+      {pendingDangerExport ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/35" onClick={handleDangerGateCancel}></div>
+          <div className="relative w-full max-w-lg rounded-xl border border-red-300 bg-white shadow-2xl p-5 space-y-4">
+            <div className="inline-flex items-center gap-2 text-red-700 text-sm font-semibold">
+              <AlertCircle size={16} />
+              Danger skills selected
+            </div>
+            <p className="text-sm text-gray-700">
+              Export includes one or more skills marked as <code>riskLevel=danger</code>. Confirm that you understand
+              the risk before continuing.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={handleDangerGateCancel}
+                className="px-3 py-2 rounded-md border border-[#D9D6CE] bg-white text-sm text-gray-700 hover:bg-[#F7F5EF]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDangerGateContinue}
+                className="px-3 py-2 rounded-md bg-red-600 text-white text-sm hover:bg-red-700"
+              >
+                I understand / Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {draftPreview ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4">

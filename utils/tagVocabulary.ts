@@ -1,7 +1,7 @@
 import { InvalidTagIssue, MachineTagSemantics } from '../types';
 
 type MachineField = keyof MachineTagSemantics;
-export const TAG_VOCAB_VERSION = '2026-02-08';
+export const TAG_VOCAB_VERSION = '2026-02-09';
 
 export const TAG_VOCAB: readonly string[] = [
   'requirements',
@@ -207,6 +207,16 @@ const ARTIFACT_FIELD_AUTOCORRECT: Record<string, string> = {
   slack: 'report',
   discord: 'report',
   telegram: 'report',
+};
+
+export const ALIAS_MAP: Record<string, string> = {
+  js: 'javascript',
+  ts: 'typescript',
+  reactjs: 'react',
+  react_js: 'react',
+  node: 'nodejs',
+  nodejs: 'nodejs',
+  node_js: 'nodejs',
 };
 
 const SYNONYM_TO_TAG: Record<string, string> = {
@@ -519,6 +529,11 @@ function mapRawTag(rawTag: string): { mapped: string | null; issue: InvalidTagIs
   }
 
   const normalizedCompact = normalized.replace(/\s+/g, '');
+  const alias = ALIAS_MAP[normalizedCompact] || ALIAS_MAP[normalized];
+  if (alias) {
+    return { mapped: alias, issue: null };
+  }
+
   const exactSynonym = SYNONYM_TO_TAG[normalizedCompact] || SYNONYM_TO_TAG[normalized];
   if (exactSynonym) {
     return { mapped: exactSynonym, issue: null };

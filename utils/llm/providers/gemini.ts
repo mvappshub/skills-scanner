@@ -9,11 +9,79 @@ function cleanJson(text: string): string {
   return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
 }
 
-function resolveApiKey(): string | undefined {
-  const processEnv = typeof process !== 'undefined' ? (process as any)?.env : undefined;
-  const viteEnv = (import.meta as any)?.env || {};
+function extractFirstJsonObject(text: string): string | null {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
 
-  return processEnv?.API_KEY || processEnv?.GEMINI_API_KEY || viteEnv?.VITE_API_KEY || viteEnv?.VITE_GEMINI_API_KEY;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          return text.slice(start, index + 1);
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseObjectJson(text: string): Record<string, unknown> {
+  const cleaned = cleanJson(text);
+  try {
+    const direct = JSON.parse(cleaned);
+    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      return direct as Record<string, unknown>;
+    }
+  } catch {
+    // fall through to object-substring fallback
+  }
+
+  const candidate = extractFirstJsonObject(cleaned);
+  if (!candidate) {
+    throw new Error('Gemini returned non-object JSON.');
+  }
+
+  const parsed = JSON.parse(candidate);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Gemini returned non-object JSON.');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function resolveApiKey(): string | undefined {
+  const viteEnv = (import.meta as any)?.env || {};
+  return viteEnv?.VITE_GEMINI_API_KEY;
 }
 
 function mapSchemaType(typeValue: string, Type: GenAiSdkModule['Type']): unknown {
@@ -68,7 +136,7 @@ async function getClient() {
   const apiKey = resolveApiKey();
 
   if (!apiKey) {
-    throw new Error('Missing Gemini API key (API_KEY / GEMINI_API_KEY / VITE_GEMINI_API_KEY).');
+    throw new Error('Missing VITE_GEMINI_API_KEY');
   }
 
   return new GoogleGenAI({ apiKey });
@@ -89,12 +157,14 @@ async function generateJson(model: string, prompt: string, schema: JsonSchema): 
     throw new Error('Gemini returned empty response.');
   }
 
-  const parsed = JSON.parse(cleanJson(response.text));
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Gemini returned non-object JSON.');
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseObjectJson(response.text);
+  } catch (error) {
+    throw new Error(`Gemini JSON parse failed: ${error instanceof Error ? error.message : 'unknown error'}`);
   }
 
-  return parsed as Record<string, unknown>;
+  return parsed;
 }
 
 export class GeminiProvider implements LlmClient {
@@ -108,4 +178,3 @@ export class GeminiProvider implements LlmClient {
     return generateJson(getWorkflowModelId('gemini'), prompt, schema);
   }
 }
-
