@@ -16,33 +16,35 @@ View your app in AI Studio: https://ai.studio/apps/drive/1ZVlt00iaBTlGD1WfCa8SEu
 1. Install dependencies:
    `npm install`
 2. Set provider in [.env.local](.env.local):
-   - `VITE_LLM_PROVIDER=gemini` (default) or `VITE_LLM_PROVIDER=claude-bridge`
+   - `VITE_LLM_PROVIDER=gemini` (default) or `VITE_LLM_PROVIDER=claude-code`
 3. For Gemini mode, set `VITE_GEMINI_API_KEY` in `.env.local`
 4. Run the app:
    `npm run dev`
 
 ## Claude Bridge Mode (local)
 
-1. Set server env vars (shell env or `.env`):
-   - `ANTHROPIC_API_KEY=<your_key>` (required)
-   - `CLAUDE_BRIDGE_PORT=3789` (optional)
+1. Install Claude Code CLI and finish login once:
+   - install CLI so `claude --help` works
+   - run `claude` and complete login
+2. Set server env vars (optional):
+   - `CLAUDE_BRIDGE_PORT=3789`
+   - `CLAUDE_CLI_BIN=claude` (if binary name/path differs)
 2. Start bridge:
    - `npm run claude-bridge`
 3. In frontend `.env.local` set:
-   - `VITE_LLM_PROVIDER=claude-bridge`
+   - `VITE_LLM_PROVIDER=claude-code`
    - `VITE_CLAUDE_BRIDGE_URL=http://localhost:3789`
 
 Bridge healthcheck:
-- `GET http://localhost:3789/health` → `{ "ok": true }`
+- `GET http://localhost:3789/health` → includes `ok`, `cliInstalled`, `loggedIn`
 
 ### Bash / zsh quickstart
 
 ```bash
-export ANTHROPIC_API_KEY=your_key_here
 npm run claude-bridge
 
 # new terminal
-export VITE_LLM_PROVIDER=claude-bridge
+export VITE_LLM_PROVIDER=claude-code
 export VITE_CLAUDE_BRIDGE_URL=http://localhost:3789
 npm run dev
 ```
@@ -50,11 +52,10 @@ npm run dev
 ### PowerShell quickstart
 
 ```powershell
-$env:ANTHROPIC_API_KEY='your_key_here'
 npm run claude-bridge
 
 # new terminal
-$env:VITE_LLM_PROVIDER='claude-bridge'
+$env:VITE_LLM_PROVIDER='claude-code'
 $env:VITE_CLAUDE_BRIDGE_URL='http://localhost:3789'
 npm run dev
 ```
@@ -64,7 +65,7 @@ npm run dev
 - `npm run dev:gemini`
 - `npm run dev:claude`
 - `npm run bridge:selftest`
-  - requires running bridge with valid `ANTHROPIC_API_KEY`
+  - requires running bridge with Claude CLI installed and logged in
 
 ## RC1 Demo Path
 

@@ -6,14 +6,13 @@
   "scripts": {
     "dev": "vite",
     "dev:gemini": "node scripts/dev-with-provider.mjs gemini",
-    "dev:claude": "node scripts/dev-with-provider.mjs claude-bridge http://localhost:3789",
+    "dev:claude": "node scripts/dev-with-provider.mjs claude-code http://localhost:3789",
     "build": "vite build",
     "preview": "vite preview",
     "claude-bridge": "node claude-bridge/server.mjs",
     "bridge:selftest": "node scripts/bridge-selftest.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.63.0",
     "@google/genai": "^1.40.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

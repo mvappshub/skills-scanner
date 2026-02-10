@@ -1,5 +1,8 @@
 # RC1 Sign-off
 
+- Status note (2026-02-10): this report was produced before migration to Claude Code CLI runtime.
+  Current Claude provider is `claude-code` (via local bridge + `claude -p --json-schema`) and no longer depends on `ANTHROPIC_API_KEY`.
+
 - Date: 2026-02-10
 - Tested commit: `c74d177`
 - Repo under test: fresh clone at `c:\Users\marti\Downloads\skills-scanner-rc1-signoff-20260210-005511`
@@ -18,17 +21,16 @@ npx vite --host 127.0.0.1 --port 5181
 # probe: GET http://127.0.0.1:5181 -> 200
 
 # Claude bridge + dev smoke
-$env:ANTHROPIC_API_KEY='dummy-local-key'
 $env:CLAUDE_BRIDGE_PORT='3794'
 node claude-bridge/server.mjs
 # probe: GET http://127.0.0.1:3794/health -> 200
 
-$env:VITE_LLM_PROVIDER='claude-bridge'
+$env:VITE_LLM_PROVIDER='claude-code'
 $env:VITE_CLAUDE_BRIDGE_URL='http://127.0.0.1:3794'
 npx vite --host 127.0.0.1 --port 5182
 # probe: GET http://127.0.0.1:5182 -> 200
 
-# Bridge selftest (expected fail with dummy API key)
+# Bridge selftest
 $env:CLAUDE_BRIDGE_URL='http://127.0.0.1:3795'
 npm run bridge:selftest
 ```
@@ -36,8 +38,7 @@ npm run bridge:selftest
 ## Preconditions Found
 
 - `VITE_GEMINI_API_KEY`: missing in local env.
-- `ANTHROPIC_API_KEY`: missing in local env.
-- Consequence: full provider generation path (Gemini/Claude real model call) cannot be signed off in this environment.
+- Consequence: full Gemini provider generation path cannot be signed off in this environment.
 
 ## DEMO Checklist (docs/DEMO.md)
 
@@ -78,4 +79,4 @@ npm run bridge:selftest
 ## Sign-off Decision
 
 - RC1 infrastructure and startup hardening: **PASS**.
-- Full end-to-end RC1 UX/provider generation: **PENDING** (requires valid `VITE_GEMINI_API_KEY` and `ANTHROPIC_API_KEY` + manual browser run).
+- Full end-to-end RC1 UX/provider generation: **PENDING** (requires valid `VITE_GEMINI_API_KEY` + manual browser run).

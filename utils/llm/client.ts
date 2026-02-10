@@ -6,7 +6,7 @@ import { LlmClient } from './types';
 let singleton: LlmClient | null = null;
 
 function createClient(): LlmClient {
-  if (LLM_PROVIDER === 'claude-bridge') {
+  if (LLM_PROVIDER === 'claude-code') {
     return new ClaudeBridgeProvider();
   }
   return new GeminiProvider();
@@ -18,4 +18,3 @@ export function getLlmClient(): LlmClient {
   }
   return singleton;
 }
-

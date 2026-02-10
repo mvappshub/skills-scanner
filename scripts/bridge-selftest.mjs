@@ -18,8 +18,18 @@ async function callJson(path, init = {}) {
 
 async function run() {
   const health = await callJson('/health');
-  if (!health || health.ok !== true) {
+  if (!health || typeof health !== 'object') {
     throw new Error('/health returned unexpected payload');
+  }
+
+  if (health.ok !== true) {
+    if (health.cliInstalled === false) {
+      throw new Error('bridge health failed: install Claude Code CLI (`claude`)');
+    }
+    if (health.loggedIn === false) {
+      throw new Error('bridge health failed: run `claude` and complete login');
+    }
+    throw new Error(`/health failed: ${typeof health.detail === 'string' ? health.detail : 'bridge not ready'}`);
   }
 
   const generated = await callJson('/generate/semantics', {
@@ -54,4 +64,3 @@ run().catch((error) => {
   console.error(`bridge:selftest failed: ${message}`);
   process.exit(1);
 });
-

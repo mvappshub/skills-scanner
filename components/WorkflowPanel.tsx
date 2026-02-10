@@ -985,7 +985,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     let timer: number | undefined;
 
     const checkBridge = async () => {
-      if (LLM_PROVIDER !== 'claude-bridge') {
+      if (LLM_PROVIDER !== 'claude-code') {
         if (!cancelled) {
           setBridgeStatus('idle');
           setBridgeStatusDetail(null);
@@ -1024,7 +1024,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
     };
 
     void checkBridge();
-    if (LLM_PROVIDER === 'claude-bridge') {
+    if (LLM_PROVIDER === 'claude-code') {
       timer = window.setInterval(() => {
         void checkBridge();
       }, 15000);
@@ -1644,7 +1644,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
               >
                 Load demo + run demo pipeline
               </button>
-              {LLM_PROVIDER === 'claude-bridge' ? (
+              {LLM_PROVIDER === 'claude-code' ? (
                 <span
                   className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs ${
                     bridgeStatus === 'online'
@@ -1661,7 +1661,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
                   Provider: {LLM_PROVIDER}
                 </span>
               )}
-              {LLM_PROVIDER === 'claude-bridge' && bridgeStatus !== 'online' ? (
+              {LLM_PROVIDER === 'claude-code' && bridgeStatus !== 'online' ? (
                 <span className="text-xs text-red-700">
                   Bridge offline. Run <code>npm run claude-bridge</code>.
                 </span>
@@ -1723,7 +1723,7 @@ const WorkflowPanel: React.FC<WorkflowPanelProps> = ({ skills, graph, analysisPr
               time-to-assemble: {lastAssembleDurationMs !== null ? `${lastAssembleDurationMs} ms` : '-'} · danger confirmations:{' '}
               {dangerConfirmCount}
             </div>
-            {LLM_PROVIDER === 'claude-bridge' && bridgeStatusDetail ? (
+            {LLM_PROVIDER === 'claude-code' && bridgeStatusDetail ? (
               <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5">
                 {bridgeStatusDetail}
               </div>

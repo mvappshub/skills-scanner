@@ -15,7 +15,7 @@ If you want Claude Bridge mode, see step 2 and then run `npm run dev:claude`.
 ## 2) Optional: start Claude Bridge
 
 ```bash
-export ANTHROPIC_API_KEY=your_key_here
+# make sure `claude --help` works and you have completed login via `claude`
 npm run claude-bridge
 ```
 
@@ -92,4 +92,4 @@ For a missing tag:
 npm run bridge:selftest
 ```
 
-Requires running bridge on `http://localhost:3789` with valid `ANTHROPIC_API_KEY`.
+Requires running bridge on `http://localhost:3789` with Claude CLI installed and logged in.

@@ -1,4 +1,4 @@
-export type LlmProviderId = 'gemini' | 'claude-bridge';
+export type LlmProviderId = 'gemini' | 'claude-code';
 
 function readEnv(key: string): string | undefined {
   const viteEnv = (import.meta as any)?.env;
@@ -7,7 +7,7 @@ function readEnv(key: string): string | undefined {
 }
 
 function normalizeProvider(raw: string | undefined): LlmProviderId {
-  if (raw === 'claude-bridge') return 'claude-bridge';
+  if (raw === 'claude-code' || raw === 'claude-bridge') return 'claude-code';
   return 'gemini';
 }
 
@@ -24,19 +24,22 @@ const GEMINI_WORKFLOW_MODEL_ID =
   'gemini-2.5-flash';
 
 const CLAUDE_SEMANTICS_MODEL_ID =
+  readEnv('VITE_CLAUDE_CODE_SEMANTICS_MODEL_ID') ||
+  readEnv('VITE_CLAUDE_CODE_MODEL_ID') ||
   readEnv('VITE_CLAUDE_SEMANTICS_MODEL_ID') ||
   readEnv('VITE_CLAUDE_MODEL_ID') ||
-  'claude-3-5-sonnet-latest';
+  'sonnet';
 const CLAUDE_WORKFLOW_MODEL_ID =
+  readEnv('VITE_CLAUDE_CODE_WORKFLOW_MODEL_ID') ||
+  readEnv('VITE_CLAUDE_CODE_MODEL_ID') ||
   readEnv('VITE_CLAUDE_WORKFLOW_MODEL_ID') ||
   readEnv('VITE_CLAUDE_MODEL_ID') ||
-  'claude-3-5-sonnet-latest';
+  'sonnet';
 
 export function getSemanticsModelId(providerId: LlmProviderId = LLM_PROVIDER): string {
-  return providerId === 'claude-bridge' ? CLAUDE_SEMANTICS_MODEL_ID : GEMINI_SEMANTICS_MODEL_ID;
+  return providerId === 'claude-code' ? CLAUDE_SEMANTICS_MODEL_ID : GEMINI_SEMANTICS_MODEL_ID;
 }
 
 export function getWorkflowModelId(providerId: LlmProviderId = LLM_PROVIDER): string {
-  return providerId === 'claude-bridge' ? CLAUDE_WORKFLOW_MODEL_ID : GEMINI_WORKFLOW_MODEL_ID;
+  return providerId === 'claude-code' ? CLAUDE_WORKFLOW_MODEL_ID : GEMINI_WORKFLOW_MODEL_ID;
 }
-

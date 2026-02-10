@@ -57,11 +57,11 @@ async function postBridgeJson(path: string, body: BridgeGenerateRequest): Promis
 }
 
 export class ClaudeBridgeProvider implements LlmClient {
-  providerId = 'claude-bridge';
+  providerId = 'claude-code';
 
   async generateSemantics(prompt: string, schema: JsonSchema): Promise<Record<string, unknown>> {
     return postBridgeJson('/generate/semantics', {
-      modelId: getSemanticsModelId('claude-bridge'),
+      modelId: getSemanticsModelId('claude-code'),
       prompt,
       schema,
     });
@@ -69,7 +69,7 @@ export class ClaudeBridgeProvider implements LlmClient {
 
   async generateWorkflowPlan(prompt: string, schema: JsonSchema): Promise<Record<string, unknown>> {
     return postBridgeJson('/generate/workflow', {
-      modelId: getWorkflowModelId('claude-bridge'),
+      modelId: getWorkflowModelId('claude-code'),
       prompt,
       schema,
     });
@@ -82,10 +82,23 @@ export class ClaudeBridgeProvider implements LlmClient {
         return { ok: false, detail: `HTTP ${response.status}` };
       }
       const payload = await response.json().catch(() => null);
-      if (!payload || payload.ok !== true) {
+      if (!payload || typeof payload !== 'object') {
         return { ok: false, detail: 'Unexpected response payload.' };
       }
-      return { ok: true };
+
+      if (payload.ok === true) {
+        return { ok: true };
+      }
+
+      if (payload.cliInstalled === false) {
+        return { ok: false, detail: 'Install Claude Code CLI (`claude`).' };
+      }
+
+      if (payload.loggedIn === false) {
+        return { ok: false, detail: 'Run `claude` and complete login.' };
+      }
+
+      return { ok: false, detail: typeof payload.detail === 'string' ? payload.detail : 'Bridge unavailable.' };
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : 'Bridge unavailable' };
     }

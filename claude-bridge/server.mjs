@@ -1,25 +1,21 @@
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import os from 'os';
+import path from 'path';
+import { readFile } from 'fs/promises';
+import { spawn } from 'child_process';
 
 dotenv.config();
 
 const PORT = Number(process.env.CLAUDE_BRIDGE_PORT || 3789);
 const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_BRIDGE_TIMEOUT_MS || 60000);
-const DEFAULT_MODEL = process.env.CLAUDE_MODEL_ID || 'claude-3-5-sonnet-latest';
-const API_KEY = process.env.ANTHROPIC_API_KEY;
+const CLAUDE_CLI_BIN = process.env.CLAUDE_CLI_BIN || 'claude';
 const allowedOrigins = (process.env.CLAUDE_BRIDGE_ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map((entry) => entry.trim())
   .filter(Boolean);
 
-if (!API_KEY) {
-  console.error('[claude-bridge] Missing ANTHROPIC_API_KEY in environment.');
-  process.exit(1);
-}
-
-const anthropic = new Anthropic({ apiKey: API_KEY });
 const app = express();
 
 app.use(
@@ -35,9 +31,18 @@ app.use(
 );
 app.use(express.json({ limit: '1mb' }));
 
+class BridgeError extends Error {
+  constructor(message, code, statusCode = 500) {
+    super(message);
+    this.name = 'BridgeError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
 function assertGeneratePayload(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new Error('Body must be a JSON object.');
+    throw new BridgeError('Body must be a JSON object.', 'INVALID_REQUEST', 400);
   }
 
   const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
@@ -45,11 +50,11 @@ function assertGeneratePayload(body) {
   const modelId = typeof body.modelId === 'string' ? body.modelId.trim() : undefined;
 
   if (!prompt) {
-    throw new Error('Missing required field: prompt.');
+    throw new BridgeError('Missing required field: prompt.', 'INVALID_REQUEST', 400);
   }
 
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-    throw new Error('Missing required field: schema (JSON object).');
+    throw new BridgeError('Missing required field: schema (JSON object).', 'INVALID_REQUEST', 400);
   }
 
   return { prompt, schema, modelId: modelId || undefined };
@@ -131,79 +136,192 @@ function parseJsonObjectFromText(text) {
   return null;
 }
 
-async function generateStrictJson({ prompt, schema, modelId }) {
-  const abortController = new AbortController();
-  const timeoutHandle = setTimeout(() => abortController.abort(), REQUEST_TIMEOUT_MS);
-  let response;
+function isNotLoggedInOutput(outputText) {
+  const lower = outputText.toLowerCase();
+  return (
+    lower.includes('not authenticated') ||
+    lower.includes('authentication required') ||
+    lower.includes('please log in') ||
+    lower.includes('please login') ||
+    lower.includes('run claude') ||
+    lower.includes('setup-token') ||
+    lower.includes('oauth')
+  );
+}
 
-  try {
-    response = await anthropic.messages.create(
-      {
-        model: modelId || DEFAULT_MODEL,
-        max_tokens: 4096,
-        temperature: 0,
-        output_config: {
-          format: {
-            type: 'json_schema',
-            schema,
-          },
-        },
-        messages: [{ role: 'user', content: prompt }],
-      },
-      { signal: abortController.signal },
-    );
-  } catch (error) {
-    if (abortController.signal.aborted) {
-      const timeoutError = new Error(`Claude request timed out after ${REQUEST_TIMEOUT_MS} ms.`);
-      timeoutError.name = 'TimeoutError';
-      throw timeoutError;
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutHandle);
-  }
+async function runCommand(command, args, options = {}) {
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  for (const block of response.content || []) {
-    if (block?.type === 'output_json' && block.json && typeof block.json === 'object' && !Array.isArray(block.json)) {
-      return block.json;
-    }
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    });
 
-    if (block?.type === 'text' && typeof block.text === 'string') {
-      const parsed = parseJsonObjectFromText(block.text);
-      if (parsed) {
-        return parsed;
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const timeoutHandle = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      child.kill();
+      reject(new BridgeError(`claude CLI request timed out after ${timeoutMs}ms`, 'CLI_TIMEOUT', 504));
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8');
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+
+    child.on('error', (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutHandle);
+
+      if (error && error.code === 'ENOENT') {
+        reject(new BridgeError('Install Claude Code CLI (`claude`) and try again.', 'CLI_MISSING', 503));
+        return;
       }
+
+      reject(new BridgeError(error instanceof Error ? error.message : 'Failed to start claude CLI.', 'CLI_START_FAILED', 500));
+    });
+
+    child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutHandle);
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const combined = `${stderr}\n${stdout}`.trim();
+      if (isNotLoggedInOutput(combined)) {
+        reject(new BridgeError('Run `claude` and complete login, then retry.', 'CLI_NOT_AUTHENTICATED', 401));
+        return;
+      }
+
+      reject(new BridgeError(combined || `claude CLI exited with code ${code}.`, 'CLI_RUNTIME_ERROR', 500));
+    });
+  });
+}
+
+async function checkClaudeCliInstalled() {
+  try {
+    await runCommand(CLAUDE_CLI_BIN, ['--version'], { timeoutMs: 10000 });
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof BridgeError && error.code === 'CLI_MISSING') {
+      return { ok: false, detail: error.message };
+    }
+    return { ok: false, detail: error instanceof Error ? error.message : 'Unknown CLI check failure.' };
+  }
+}
+
+async function checkClaudeLoginState() {
+  try {
+    const configPath = path.join(os.homedir(), '.claude.json');
+    const raw = await readFile(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const oauthAccount = parsed?.oauthAccount;
+    if (oauthAccount && typeof oauthAccount === 'object') {
+      return { ok: true };
+    }
+
+    return { ok: false, detail: 'Run `claude` and complete login, then retry.' };
+  } catch {
+    return { ok: false, detail: 'Run `claude` and complete login, then retry.' };
+  }
+}
+
+async function generateStrictJson({ prompt, schema, modelId }) {
+  const args = ['-p', prompt, '--json-schema', JSON.stringify(schema), '--output-format', 'json', '--max-turns', '4'];
+
+  if (modelId) {
+    args.push('--model', modelId);
+  }
+
+  const { stdout } = await runCommand(CLAUDE_CLI_BIN, args, { timeoutMs: REQUEST_TIMEOUT_MS });
+  const envelope = parseJsonObjectFromText(stdout);
+  if (!envelope) {
+    throw new BridgeError('claude CLI returned invalid JSON for provided schema.', 'INVALID_JSON', 500);
+  }
+
+  if (typeof envelope.subtype === 'string' && envelope.subtype.startsWith('error')) {
+    throw new BridgeError(`claude CLI error: ${envelope.subtype}`, 'CLI_RUNTIME_ERROR', 500);
+  }
+
+  const structured = envelope.structured_output;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    return structured;
+  }
+
+  if (typeof envelope.result === 'string') {
+    const parsedResult = parseJsonObjectFromText(envelope.result);
+    if (parsedResult) {
+      return parsedResult;
     }
   }
 
-  throw new Error('Claude returned invalid structured JSON payload.');
+  if (typeof envelope.type !== 'string') {
+    return envelope;
+  }
+
+  throw new BridgeError('claude CLI did not return structured_output JSON.', 'INVALID_JSON', 500);
 }
 
 function toClientError(error) {
-  const isTimeout = error?.name === 'AbortError' || error?.name === 'TimeoutError';
-  const status = typeof error?.status === 'number' ? error.status : undefined;
-  const code =
-    typeof error?.error?.error?.type === 'string'
-      ? error.error.error.type
-      : typeof error?.error?.type === 'string'
-        ? error.error.type
-        : undefined;
-  const upstreamMessage =
-    typeof error?.error?.error?.message === 'string'
-      ? error.error.error.message
-      : typeof error?.error?.message === 'string'
-        ? error.error.message
-        : undefined;
-  const message = upstreamMessage || (status ? 'Upstream request failed.' : error instanceof Error ? error.message : 'Unknown bridge error');
+  if (error instanceof BridgeError) {
+    return {
+      statusCode: error.statusCode,
+      ok: false,
+      error: error.message,
+      code: error.code,
+    };
+  }
+
   return {
-    statusCode: isTimeout ? 504 : 500,
+    statusCode: 500,
     ok: false,
-    error: status ? `Claude API error (${status}${code ? `/${code}` : ''}): ${message}` : message,
+    error: error instanceof Error ? error.message : 'Unknown bridge error.',
+    code: 'UNKNOWN',
   };
 }
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true });
+app.get('/health', async (_req, res) => {
+  const cli = await checkClaudeCliInstalled();
+  if (!cli.ok) {
+    res.json({
+      ok: false,
+      cliInstalled: false,
+      loggedIn: false,
+      detail: cli.detail || 'Install Claude Code CLI (`claude`).',
+    });
+    return;
+  }
+
+  const login = await checkClaudeLoginState();
+  if (!login.ok) {
+    res.json({
+      ok: false,
+      cliInstalled: true,
+      loggedIn: false,
+      detail: login.detail || 'Run `claude` and complete login.',
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    cliInstalled: true,
+    loggedIn: true,
+    detail: 'claude CLI is available and login state looks valid.',
+  });
 });
 
 app.post('/generate/semantics', async (req, res) => {
@@ -213,7 +331,7 @@ app.post('/generate/semantics', async (req, res) => {
     res.json(result);
   } catch (error) {
     const payload = toClientError(error);
-    res.status(payload.statusCode).json({ ok: false, error: payload.error });
+    res.status(payload.statusCode).json({ ok: false, error: payload.error, code: payload.code });
   }
 });
 
@@ -224,7 +342,7 @@ app.post('/generate/workflow', async (req, res) => {
     res.json(result);
   } catch (error) {
     const payload = toClientError(error);
-    res.status(payload.statusCode).json({ ok: false, error: payload.error });
+    res.status(payload.statusCode).json({ ok: false, error: payload.error, code: payload.code });
   }
 });
 
